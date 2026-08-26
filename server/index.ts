@@ -2,8 +2,6 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { db } from "./db.js";
 import { auth, role, sign } from "./auth.js";
 
@@ -230,18 +228,4 @@ app.get("/api/admin/stats", auth, role("admin"), (_req, res) => {
   res.json({ ordersByStatus, usersByRole, revenue: revenue.r });
 });
 
-// ---------- Frontend ----------
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-app.use(express.static(path.join(__dirname, "../dist")));
-
-// Let the React/Vite frontend handle browser routes.
-// API routes above are unaffected.
-app.use((_req, res) => {
-  res.sendFile(path.join(__dirname, "../dist/index.html"));
-});
-
-app.listen(Number(process.env.PORT) || 4000, "0.0.0.0", () =>
-  console.log("Wassli API running")
-);
+app.listen(Number(process.env.PORT) || 4000, "0.0.0.0", () => console.log("Wassli API running"));

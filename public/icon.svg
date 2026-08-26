@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="112" fill="#16a34a"/>
+<circle cx="384" cy="120" r="76" fill="#dcfce7" opacity=".35"/>
+<text x="256" y="350" text-anchor="middle" font-family="Arial,Tahoma,sans-serif" font-size="112" font-weight="900" fill="white">وصلي</text>
+<g fill="none" stroke="white" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+<circle cx="135" cy="188" r="42"/><circle cx="360" cy="188" r="42"/>
+<path d="M135 188h70l42-58h57l56 58h-70l-35 48h-82l-25-48zm112-58-20-36h48l27 36"/>
+</g>
+</svg>
