@@ -1,0 +1,32 @@
+name: Extract Wassli ZIP to repo root
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract Wassli-Final-Web.zip into repo root
+        run: unzip -o "Wassli-Final-Web.zip" -d .
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit extracted project files
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Extract Wassli-Final-Web.zip into repo root"
+            git push
+          fi
