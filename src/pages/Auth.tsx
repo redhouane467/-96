@@ -1,37 +1,38 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { api } from "../lib/api";
-import type { User } from "../types";
+import type { Role, User } from "../types";
 
-// Define the shape of the form data for better type safety
-interface AuthFormData {
-  role: "customer" | "courier";
-  name?: string;
-  phone?: string;
-  email?: string;
-  password?: string;
-}
+const ROLE_META: Record<Role, { label: string; emoji: string }> = {
+  customer: { label: "عميل", emoji: "👤" },
+  courier: { label: "مندوب", emoji: "🛵" },
+  admin: { label: "مدير", emoji: "👨‍💼" },
+};
 
-// Define the shape of the API response for authentication
-interface AuthApiResponse {
-  token: string;
-  user: User;
-}
-
-export default function Auth({ onAuth }: { onAuth: (u: User) => void }) {
+export default function Auth({
+  role,
+  onAuth,
+  onBack,
+}: {
+  role: Role;
+  onAuth: (u: User) => void;
+  onBack: () => void;
+}) {
+  const canRegister = role !== "admin";
   const [mode, setMode] = useState<"login" | "register">("login");
-  // Use the defined AuthFormData type instead of 'any'
-  const [form, setForm] = useState<AuthFormData>({ role: "customer" });
+  const [form, setForm] = useState<any>({});
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const meta = ROLE_META[role];
+  const effectiveMode = canRegister ? mode : "login";
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError("");
     setLoading(true);
     try {
-      // Use the defined AuthApiResponse type for the api call
-      const data = await api<AuthApiResponse>(`/auth/${mode}`, { method: "POST", body: JSON.stringify(form) });
+      const payload = effectiveMode === "register" ? { ...form, role } : form;
+      const data = await api<any>(`/auth/${effectiveMode}`, { method: "POST", body: JSON.stringify(payload) });
       localStorage.setItem("wassli_token", data.token);
       localStorage.setItem("wassli_user", JSON.stringify(data.user));
       onAuth(data.user);
@@ -45,15 +46,26 @@ export default function Auth({ onAuth }: { onAuth: (u: User) => void }) {
   return (
     <main className="min-h-screen flex items-center justify-center p-4 bg-slate-50">
       <form onSubmit={submit} className="w-full max-w-md bg-white rounded-3xl shadow p-7 space-y-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="text-slate-400 text-sm flex items-center gap-1 hover:text-slate-600"
+        >
+          <span>›</span> رجوع لاختيار نوع الحساب
+        </button>
+
         <div className="text-center">
-          <div className="mx-auto w-16 h-16 rounded-2xl bg-green-600 text-white flex items-center justify-center text-3xl">
-            📍
-          </div>
+          <img src="/icon-192.png" alt="وصلي" className="mx-auto w-16 h-16 rounded-2xl shadow" />
           <h1 className="text-3xl font-black mt-3">وصلي</h1>
-          <p className="text-slate-500">توصيل سريع وبسيط</p>
+          <p className="text-slate-500 flex items-center justify-center gap-1.5 mt-1">
+            <span className="text-lg">{meta.emoji}</span>
+            <span>
+              {effectiveMode === "login" ? "تسجيل الدخول كـ" : "إنشاء حساب"} {meta.label}
+            </span>
+          </p>
         </div>
 
-        {mode === "register" && (
+        {effectiveMode === "register" && (
           <>
             <input
               className="w-full border rounded-xl p-3"
@@ -67,15 +79,6 @@ export default function Auth({ onAuth }: { onAuth: (u: User) => void }) {
               required
               onChange={(e) => setForm({ ...form, phone: e.target.value })}
             />
-            <select
-              className="w-full border rounded-xl p-3"
-              value={form.role}
-              // Explicitly cast e.target.value to the correct union type
-              onChange={(e) => setForm({ ...form, role: e.target.value as "customer" | "courier" })}
-            >
-              <option value="customer">عميل</option>
-              <option value="courier">مندوب</option>
-            </select>
           </>
         )}
 
@@ -98,15 +101,18 @@ export default function Auth({ onAuth }: { onAuth: (u: User) => void }) {
         {error && <div className="bg-red-50 text-red-700 p-3 rounded-xl text-sm">{error}</div>}
 
         <button disabled={loading} className="w-full bg-green-600 text-white rounded-xl p-3 font-bold disabled:opacity-60">
-          {loading ? "..." : mode === "login" ? "دخول" : "إنشاء حساب"}
+          {loading ? "..." : effectiveMode === "login" ? "دخول" : "إنشاء حساب"}
         </button>
-        <button
-          type="button"
-          className="w-full text-green-700"
-          onClick={() => setMode(mode === "login" ? "register" : "login")}
-        >
-          {mode === "login" ? "ليس لديك حساب؟ إنشاء حساب" : "لديك حساب؟ تسجيل الدخول"}
-        </button>
+
+        {canRegister && (
+          <button
+            type="button"
+            className="w-full text-green-700"
+            onClick={() => setMode(mode === "login" ? "register" : "login")}
+          >
+            {mode === "login" ? "ليس لديك حساب؟ إنشاء حساب" : "لديك حساب؟ تسجيل الدخول"}
+          </button>
+        )}
       </form>
     </main>
   );

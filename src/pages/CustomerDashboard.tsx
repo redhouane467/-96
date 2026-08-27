@@ -5,6 +5,113 @@ import type { Complaint, Order, User } from "../types";
 import Header from "../components/Header";
 import OrderCard from "../components/OrderCard";
 
+type Tab = "orders" | "new" | "complaints";
+
+export default function CustomerDashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
+  const [tab, setTab] = useState<Tab>("orders");
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [complaints, setComplaints] = useState<Complaint[]>([]);
+  const [msg, setMsg] = useState("");
+
+  async function loadOrders() {
+    try {
+      setOrders((await api<{ orders: Order[] }>("/orders")).orders);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "خطأ");
+    }
+  }
+  async function loadComplaints() {
+    try {
+      setComplaints((await api<{ complaints: Complaint[] }>("/complaints")).complaints);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "خطأ");
+    }
+  }
+
+  useEffect(() => {
+    loadOrders();
+  }, []);
+  useEffect(() => {
+    if (tab === "complaints") loadComplaints();
+  }, [tab]);
+
+  async function cancelOrder(id: string) {
+    try {
+      await api(`/orders/${id}/cancel`, { method: "POST" });
+      loadOrders();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "خطأ");
+    }
+  }
+  async function rate(id: string, stars: number) {
+    try {
+      await api(`/orders/${id}/rate`, { method: "POST", body: JSON.stringify({ stars }) });
+      loadOrders();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "خطأ");
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-slate-50 pb-10">
+      <Header title="عميل" subtitle={user.name} onLogout={onLogout} />
+      <nav className="max-w-5xl mx-auto flex gap-2 p-4 flex-wrap">
+        {(
+          [
+            ["orders", "طلباتي"],
+            ["new", "طلب جديد"],
+            ["complaints", "الشكاوى"],
+          ] as [Tab, string][]
+        ).map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setTab(k)}
+            className={`px-4 py-2 rounded-xl font-bold ${tab === k ? "bg-green-600 text-white" : "bg-white border"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+      <section className="max-w-5xl mx-auto p-4 space-y-4">
+        {msg && <div className="bg-white rounded-xl p-3 text-sm">{msg}</div>}
+
+        {tab === "new" && (
+          <NewOrderForm
+            onCreated={() => {
+              setTab("orders");
+              loadOrders();
+            }}
+            setMsg={setMsg}
+          />
+        )}
+
+        {tab === "orders" &&
+          (orders.length === 0 ? (
+            <p className="text-slate-500">لا توجد طلبات بعد</p>
+          ) : (
+            orders.map((o) => (
+              <OrderCard key={o.id} order={o}>
+                {o.status === "pending" && (
+                  <button onClick={() => cancelOrder(o.id)} className="text-red-600 text-sm font-bold">
+                    إلغاء الطلب
+                  </button>
+                )}
+                {o.status === "accepted" && (
+                  <div className="bg-amber-50 text-amber-800 rounded-lg p-2 text-sm">
+                    أعطِ المندوب رمز التأكيد عند الاستلام: <b>{o.confirmation_code}</b>
+                  </div>
+                )}
+                {o.status === "delivered" && <RateBox onRate={(s) => rate(o.id, s)} />}
+              </OrderCard>
+            ))
+          ))}
+
+        {tab === "complaints" && <ComplaintsTab complaints={complaints} onSubmitted={loadComplaints} />}
+      </section>
+    </main>
+  );
+}
+
 function NewOrderForm({ onCreated, setMsg }: { onCreated: () => void; setMsg: (s: string) => void }) {
   const [pickup, setPickup] = useState("");
   const [delivery, setDelivery] = useState("");
@@ -130,112 +237,5 @@ function ComplaintsTab({ complaints, onSubmitted }: { complaints: Complaint[]; o
         </div>
       ))}
     </div>
-  );
-}
-
-type Tab = "orders" | "new" | "complaints";
-
-export default function CustomerDashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
-  const [tab, setTab] = useState<Tab>("orders");
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [complaints, setComplaints] = useState<Complaint[]>([]);
-  const [msg, setMsg] = useState("");
-
-  async function loadOrders() {
-    try {
-      setOrders((await api<{ orders: Order[] }>("/orders")).orders);
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطأ");
-    }
-  }
-  async function loadComplaints() {
-    try {
-      setComplaints((await api<{ complaints: Complaint[] }>("/complaints")).complaints);
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطأ");
-    }
-  }
-
-  useEffect(() => {
-    loadOrders();
-  }, []);
-  useEffect(() => {
-    if (tab === "complaints") loadComplaints();
-  }, [tab]);
-
-  async function cancelOrder(id: string) {
-    try {
-      await api(`/orders/${id}/cancel`, { method: "POST" });
-      loadOrders();
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطأ");
-    }
-  }
-  async function rate(id: string, stars: number) {
-    try {
-      await api(`/orders/${id}/rate`, { method: "POST", body: JSON.stringify({ stars }) });
-      loadOrders();
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطأ");
-    }
-  }
-
-  return (
-    <main className="min-h-screen bg-slate-50 pb-10">
-      <Header title="عميل" subtitle={user.name} onLogout={onLogout} />
-      <nav className="max-w-5xl mx-auto flex gap-2 p-4 flex-wrap">
-        {(
-          [
-            ["orders", "طلباتي"],
-            ["new", "طلب جديد"],
-            ["complaints", "الشكاوى"],
-          ] as [Tab, string][]
-        ).map(([k, label]) => (
-          <button
-            key={k}
-            onClick={() => setTab(k)}
-            className={`px-4 py-2 rounded-xl font-bold ${tab === k ? "bg-green-600 text-white" : "bg-white border"}`}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
-      <section className="max-w-5xl mx-auto p-4 space-y-4">
-        {msg && <div className="bg-white rounded-xl p-3 text-sm">{msg}</div>}
-
-        {tab === "new" && (
-          <NewOrderForm
-            onCreated={() => {
-              setTab("orders");
-              loadOrders();
-            }}
-            setMsg={setMsg}
-          />
-        )}
-
-        {tab === "orders" &&
-          (orders.length === 0 ? (
-            <p className="text-slate-500">لا توجد طلبات بعد</p>
-          ) : (
-            orders.map((o) => (
-              <OrderCard key={o.id} order={o}>
-                {o.status === "pending" && (
-                  <button onClick={() => cancelOrder(o.id)} className="text-red-600 text-sm font-bold">
-                    إلغاء الطلب
-                  </button>
-                )}
-                {o.status === "accepted" && (
-                  <div className="bg-amber-50 text-amber-800 rounded-lg p-2 text-sm">
-                    أعطِ المندوب رمز التأكيد عند الاستلام: <b>{o.confirmation_code}</b>
-                  </div>
-                )}
-                {o.status === "delivered" && <RateBox onRate={(s) => rate(o.id, s)} />}
-              </OrderCard>
-            ))
-          ))}
-
-        {tab === "complaints" && <ComplaintsTab complaints={complaints} onSubmitted={loadComplaints} />}
-      </section>
-    </main>
   );
 }
