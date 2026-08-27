@@ -1,1 +1,12 @@
-const API=import.meta.env.VITE_API_URL||"http://localhost:4000/api";export async function api<T>(path:string,options:RequestInit={}):Promise<T>{const h=new Headers(options.headers);h.set("Content-Type","application/json");const t=localStorage.getItem("wassli_token");if(t)h.set("Authorization",`Bearer ${t}`);const r=await fetch(API+path,{...options,headers:h});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"حدث خطأ في الاتصال بالخادم");return d}
+const API = import.meta.env.VITE_API_URL || "/api";
+
+export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const h = new Headers(options.headers);
+  h.set("Content-Type", "application/json");
+  const t = localStorage.getItem("wassli_token");
+  if (t) h.set("Authorization", `Bearer ${t}`);
+  const r = await fetch(API + path, { ...options, headers: h });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || "حدث خطأ في الاتصال بالخادم");
+  return d;
+}
