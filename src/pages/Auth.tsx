@@ -3,9 +3,25 @@ import type { FormEvent } from "react";
 import { api } from "../lib/api";
 import type { User } from "../types";
 
+// Define the shape of the form data for better type safety
+interface AuthFormData {
+  role: "customer" | "courier";
+  name?: string;
+  phone?: string;
+  email?: string;
+  password?: string;
+}
+
+// Define the shape of the API response for authentication
+interface AuthApiResponse {
+  token: string;
+  user: User;
+}
+
 export default function Auth({ onAuth }: { onAuth: (u: User) => void }) {
   const [mode, setMode] = useState<"login" | "register">("login");
-  const [form, setForm] = useState<any>({ role: "customer" });
+  // Use the defined AuthFormData type instead of 'any'
+  const [form, setForm] = useState<AuthFormData>({ role: "customer" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -14,7 +30,8 @@ export default function Auth({ onAuth }: { onAuth: (u: User) => void }) {
     setError("");
     setLoading(true);
     try {
-      const data = await api<any>(`/auth/${mode}`, { method: "POST", body: JSON.stringify(form) });
+      // Use the defined AuthApiResponse type for the api call
+      const data = await api<AuthApiResponse>(`/auth/${mode}`, { method: "POST", body: JSON.stringify(form) });
       localStorage.setItem("wassli_token", data.token);
       localStorage.setItem("wassli_user", JSON.stringify(data.user));
       onAuth(data.user);
@@ -53,7 +70,8 @@ export default function Auth({ onAuth }: { onAuth: (u: User) => void }) {
             <select
               className="w-full border rounded-xl p-3"
               value={form.role}
-              onChange={(e) => setForm({ ...form, role: e.target.value })}
+              // Explicitly cast e.target.value to the correct union type
+              onChange={(e) => setForm({ ...form, role: e.target.value as "customer" | "courier" })}
             >
               <option value="customer">عميل</option>
               <option value="courier">مندوب</option>

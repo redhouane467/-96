@@ -1,22 +1,9 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 
-// In Vercel serverless functions, the file system is largely read-only,
-// with the exception of the `/tmp` directory. To avoid runtime errors
-// when creating the SQLite database file, it must be placed within `/tmp`.
-// Additionally, `path.resolve` without arguments defaults to the current working directory,
-// which might not be writable or consistent across Vercel deployments.
-// Using `path.join(os.tmpdir(), ...)` ensures the file is created in the
-// appropriate temporary directory.
-
-const dataDir = path.join(os.tmpdir(), "data");
-
-// Ensure the temporary directory for the database exists
-fs.mkdirSync(dataDir, { recursive: true });
-
-export const db = new Database(path.join(dataDir, "wassli.sqlite"));
+fs.mkdirSync("data", { recursive: true });
+export const db = new Database(path.resolve("data/wassli.sqlite"));
 db.pragma("journal_mode=WAL");
 
 db.exec(`

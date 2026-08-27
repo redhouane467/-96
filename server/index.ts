@@ -2,8 +2,10 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
-import { db } from "./db"; // Removed .js extension
-import { auth, role, sign } from "./auth"; // Removed .js extension
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { db } from "./db.js";
+import { auth, role, sign } from "./auth.js";
 
 const app = express();
 app.use(cors());
@@ -226,6 +228,23 @@ app.get("/api/admin/stats", auth, role("admin"), (_req, res) => {
   const usersByRole = db.prepare("SELECT role, COUNT(*) c FROM users GROUP BY role").all();
   const revenue: any = db.prepare("SELECT COALESCE(SUM(final_price),0) r FROM orders WHERE status='completed'").get();
   res.json({ ordersByStatus, usersByRole, revenue: revenue.r });
+});
+
+// ---------- Serve the built frontend (Vite's dist/) ----------
+// Everything above this line is an /api/* route; anything that falls
+// through to here is either a static asset (JS/CSS/images) produced by
+// `vite build`, or a page load ("/", or any client route) that should
+// receive the React app's index.html so the SPA can take over.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const distPath = path.resolve(__dirname, "..", "dist");
+
+app.use(express.static(distPath));
+
+app.use((req, res) => {
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({ error: "Not found" });
+  }
+  res.sendFile(path.join(distPath, "index.html"));
 });
 
 app.listen(Number(process.env.PORT) || 4000, "0.0.0.0", () => console.log("Wassli API running"));
