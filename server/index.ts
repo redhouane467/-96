@@ -2,8 +2,8 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
-import { db } from "./db.js";
-import { auth, role, sign } from "./auth.js";
+import { db } from "./db"; // Removed .js extension
+import { auth, role, sign } from "./auth"; // Removed .js extension
 
 const app = express();
 app.use(cors());
