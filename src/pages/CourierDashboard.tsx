@@ -19,7 +19,6 @@ export default function CourierDashboard({ user, onLogout }: { user: User; onLog
   const [error, setError] = useState("");
   const [approved, setApproved] = useState<boolean | null>(null);
   const [online, setOnline] = useState(false);
-  const [codeInputs, setCodeInputs] = useState<Record<string, string>>({});
   const toast = useToast();
   const lastSentRef = useRef(0);
   const stopWatchRef = useRef<(() => void) | null>(null);
@@ -96,6 +95,7 @@ export default function CourierDashboard({ user, onLogout }: { user: User; onLog
       toast(e instanceof Error ? e.message : "خطأ", "error");
     }
   }
+
   async function pickup(id: string) {
     try {
       await api(`/orders/${id}/pickup`, { method: "POST" });
@@ -105,9 +105,11 @@ export default function CourierDashboard({ user, onLogout }: { user: User; onLog
       toast(e instanceof Error ? e.message : "خطأ", "error");
     }
   }
+
+  // ✅ تم التعديل لإلغاء طلب رمز التأكيد وتأكيد التسليم مباشرة
   async function deliver(id: string) {
     try {
-      await api(`/orders/${id}/deliver`, { method: "POST", body: JSON.stringify({ confirmation_code: codeInputs[id] || "" }) });
+      await api(`/orders/${id}/deliver`, { method: "POST" });
       toast("تم تسليم الطلب بنجاح", "success");
       load();
     } catch (e) {
@@ -151,15 +153,13 @@ export default function CourierDashboard({ user, onLogout }: { user: User; onLog
               {active.map((o) => (
                 <ActiveOrderCard key={o.id} order={o} onPickup={() => pickup(o.id)}>
                   {o.status === "picked_up" && (
-                    <div className="flex gap-2 mt-2">
-                      <input
-                        className="flex-1 border rounded-xl p-2"
-                        placeholder="رمز التأكيد من العميل"
-                        value={codeInputs[o.id] || ""}
-                        onChange={(e) => setCodeInputs({ ...codeInputs, [o.id]: e.target.value })}
-                      />
-                      <button onClick={() => deliver(o.id)} className="bg-green-600 text-white rounded-xl px-4 font-bold">
-                        تأكيد التسليم
+                    <div className="mt-2">
+                      {/* ✅ زر التوصيل المباشر بضغطة واحدة بدون حقل إدخال الكود */}
+                      <button
+                        onClick={() => deliver(o.id)}
+                        className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-xl transition-colors"
+                      >
+                        ✅ تم التوصيل وتسليم الطرد
                       </button>
                     </div>
                   )}
