@@ -6,20 +6,36 @@ export function getCurrentPosition(): Promise<Coords> {
       reject(new Error("المتصفح لا يدعم تحديد الموقع"));
       return;
     }
+
+    // فحص ما إذا كان الموقع يعمل عبر اتصال غير آمن (HTTPS)
+    if (window.location.protocol !== "https:" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+      reject(new Error("خدمة الموقع تتطلب الاتصال عبر رابط آمن (HTTPS)"));
+      return;
+    }
+
+    // المحاولة الأولى: دقة عادية وسريعة لضمان الاستجابة
+    const options: PositionOptions = {
+      enableHighAccuracy: false, // الاستعانة برجال التغطية والـ Wi-Fi لسرعة الاستجابة
+      timeout: 15000,
+      maximumAge: 30000,
+    };
+
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
       (err) => {
-        if (err.code === err.PERMISSION_DENIED) reject(new Error("تم رفض إذن الوصول للموقع"));
-        else reject(new Error("تعذّر تحديد الموقع الحالي"));
+        if (err.code === err.PERMISSION_DENIED) {
+          reject(new Error("تم رفض إذن الوصول للموقع من المتصفح"));
+        } else if (err.code === err.TIMEOUT) {
+          reject(new Error("انتهت مهلة تحديد الموقع، يرجى تفعيل الـ GPS والتأكد من الاتصال"));
+        } else {
+          reject(new Error("تعذّر تحديد الموقع الحالي، يمكنك تحديده على الخريطة"));
+        }
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 15000 }
+      options
     );
   });
 }
 
-// Returns an unsubscribe function. Calls onUpdate with each new position
-// while active; calls onError once if geolocation is unavailable or the
-// permission is denied.
 export function watchPosition(onUpdate: (c: Coords) => void, onError?: (e: Error) => void): () => void {
   if (!("geolocation" in navigator)) {
     onError?.(new Error("المتصفح لا يدعم تحديد الموقع"));
@@ -31,7 +47,7 @@ export function watchPosition(onUpdate: (c: Coords) => void, onError?: (e: Error
       if (err.code === err.PERMISSION_DENIED) onError?.(new Error("تم رفض إذن الوصول للموقع"));
       else onError?.(new Error("تعذّر تتبع الموقع"));
     },
-    { enableHighAccuracy: true, maximumAge: 10000 }
+    { enableHighAccuracy: false, maximumAge: 10000, timeout: 15000 }
   );
   return () => navigator.geolocation.clearWatch(id);
 }
