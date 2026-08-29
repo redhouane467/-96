@@ -1,36 +1,60 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { api } from "../lib/api";
+import { useToast } from "../lib/toast";
 import type { Complaint, Order, User } from "../types";
 import Header from "../components/Header";
 import OrderCard from "../components/OrderCard";
+import { LoadingState, EmptyState, ErrorState } from "../components/States";
 
-type Tab = "stats" | "orders" | "users" | "settings" | "complaints";
+type Tab = "stats" | "couriers" | "orders" | "users" | "settings" | "complaints";
 
 type Stats = {
   ordersByStatus: { status: string; c: number }[];
   usersByRole: { role: string; c: number }[];
   revenue: number;
+  activeOrders: number;
+  couriersOnline: number;
+  couriersApproved: number;
+  couriersPending: number;
+};
+
+type CourierRow = {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  online: boolean | number;
+  approved: boolean | number;
+  location_updated_at: string | null;
 };
 
 export default function AdminDashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [tab, setTab] = useState<Tab>("stats");
   const [orders, setOrders] = useState<Order[]>([]);
   const [users, setUsers] = useState<any[]>([]);
+  const [couriers, setCouriers] = useState<CourierRow[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [settings, setSettings] = useState<Record<string, number> | null>(null);
   const [complaints, setComplaints] = useState<Complaint[]>([]);
-  const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const toast = useToast();
 
   useEffect(() => {
-    const fail = (e: unknown) => setMsg(e instanceof Error ? e.message : "خطأ");
-    if (tab === "stats") api<Stats>("/admin/stats").then(setStats).catch(fail);
-    if (tab === "orders") api<{ orders: Order[] }>("/orders").then((d) => setOrders(d.orders)).catch(fail);
-    if (tab === "users") api<{ users: any[] }>("/admin/users").then((d) => setUsers(d.users)).catch(fail);
+    setLoading(true);
+    setError("");
+    const fail = (e: unknown) => setError(e instanceof Error ? e.message : "خطأ");
+    const done = () => setLoading(false);
+    if (tab === "stats") api<Stats>("/admin/stats").then(setStats).catch(fail).finally(done);
+    if (tab === "orders") api<{ orders: Order[] }>("/orders").then((d) => setOrders(d.orders)).catch(fail).finally(done);
+    if (tab === "users") api<{ users: any[] }>("/admin/users").then((d) => setUsers(d.users)).catch(fail).finally(done);
+    if (tab === "couriers")
+      api<{ couriers: CourierRow[] }>("/admin/couriers").then((d) => setCouriers(d.couriers)).catch(fail).finally(done);
     if (tab === "settings")
-      api<{ settings: Record<string, number> }>("/admin/settings").then((d) => setSettings(d.settings)).catch(fail);
+      api<{ settings: Record<string, number> }>("/admin/settings").then((d) => setSettings(d.settings)).catch(fail).finally(done);
     if (tab === "complaints")
-      api<{ complaints: Complaint[] }>("/complaints").then((d) => setComplaints(d.complaints)).catch(fail);
+      api<{ complaints: Complaint[] }>("/complaints").then((d) => setComplaints(d.complaints)).catch(fail).finally(done);
   }, [tab]);
 
   async function saveSettings(e: FormEvent) {
@@ -42,9 +66,9 @@ export default function AdminDashboard({ user, onLogout }: { user: User; onLogou
         body: JSON.stringify(settings),
       });
       setSettings(d.settings);
-      setMsg("تم حفظ الإعدادات");
+      toast("تم حفظ الإعدادات", "success");
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : "خطأ");
+      toast(err instanceof Error ? err.message : "خطأ", "error");
     }
   }
 
@@ -53,8 +77,20 @@ export default function AdminDashboard({ user, onLogout }: { user: User; onLogou
       await api(`/complaints/${id}`, { method: "PATCH", body: JSON.stringify({ status: "resolved", response }) });
       const d = await api<{ complaints: Complaint[] }>("/complaints");
       setComplaints(d.complaints);
+      toast("تم إرسال الرد", "success");
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : "خطأ");
+      toast(err instanceof Error ? err.message : "خطأ", "error");
+    }
+  }
+
+  async function setApproval(id: string, approved: boolean) {
+    try {
+      await api(`/admin/couriers/${id}/approve`, { method: "PATCH", body: JSON.stringify({ approved }) });
+      const d = await api<{ couriers: CourierRow[] }>("/admin/couriers");
+      setCouriers(d.couriers);
+      toast(approved ? "تم اعتماد المندوب" : "تم إلغاء الاعتماد", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "خطأ", "error");
     }
   }
 
@@ -65,6 +101,7 @@ export default function AdminDashboard({ user, onLogout }: { user: User; onLogou
         {(
           [
             ["stats", "نظرة عامة"],
+            ["couriers", "المندوبون"],
             ["orders", "الطلبات"],
             ["users", "المستخدمون"],
             ["settings", "الإعدادات"],
@@ -81,15 +118,17 @@ export default function AdminDashboard({ user, onLogout }: { user: User; onLogou
         ))}
       </nav>
       <section className="max-w-5xl mx-auto p-4 space-y-4">
-        {msg && <div className="bg-white rounded-xl p-3 text-sm">{msg}</div>}
+        {loading && <LoadingState />}
+        {!loading && error && <ErrorState message={error} />}
 
-        {tab === "stats" && stats && (
+        {!loading && !error && tab === "stats" && stats && (
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            <StatCard label="طلبات نشطة" value={stats.activeOrders} />
+            <StatCard label="مندوبون متصلون" value={stats.couriersOnline} />
+            <StatCard label="مندوبون معتمدون" value={stats.couriersApproved} />
+            <StatCard label="بانتظار الاعتماد" value={stats.couriersPending} accent="amber" />
             {stats.ordersByStatus.map((s) => (
-              <div key={s.status} className="bg-white rounded-2xl p-4 shadow-sm">
-                <div className="text-slate-500 text-sm">{s.status}</div>
-                <div className="text-2xl font-black">{s.c}</div>
-              </div>
+              <StatCard key={s.status} label={s.status} value={s.c} />
             ))}
             <div className="bg-white rounded-2xl p-4 shadow-sm col-span-2">
               <div className="text-slate-500 text-sm">إجمالي إيرادات الطلبات المكتملة</div>
@@ -98,14 +137,44 @@ export default function AdminDashboard({ user, onLogout }: { user: User; onLogou
           </div>
         )}
 
-        {tab === "orders" &&
-          (orders.length === 0 ? (
-            <p className="text-slate-500">لا توجد طلبات بعد</p>
+        {!loading && !error && tab === "couriers" &&
+          (couriers.length === 0 ? (
+            <EmptyState icon="🛵" label="لا يوجد مندوبون بعد" />
           ) : (
-            orders.map((o) => <OrderCard key={o.id} order={o} />)
+            <div className="space-y-3">
+              {couriers.map((c) => (
+                <div key={c.id} className="bg-white rounded-2xl p-4 shadow-sm space-y-2">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <div className="font-bold text-slate-900">{c.name}</div>
+                      <div className="text-sm text-slate-500" dir="ltr">
+                        {c.phone}
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className={`text-xs rounded-full px-2 py-1 font-bold ${c.approved ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-800"}`}>
+                        {c.approved ? "معتمد" : "بانتظار الاعتماد"}
+                      </span>
+                      <span className={`text-xs rounded-full px-2 py-1 ${c.online ? "bg-blue-100 text-blue-700" : "bg-slate-100 text-slate-500"}`}>
+                        {c.online ? "متصل" : "غير متصل"}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setApproval(c.id, !c.approved)}
+                    className={`w-full rounded-xl py-2 font-bold text-sm ${c.approved ? "bg-red-50 text-red-700" : "bg-green-600 text-white"}`}
+                  >
+                    {c.approved ? "إلغاء الاعتماد" : "اعتماد المندوب"}
+                  </button>
+                </div>
+              ))}
+            </div>
           ))}
 
-        {tab === "users" && (
+        {!loading && !error && tab === "orders" &&
+          (orders.length === 0 ? <EmptyState icon="📦" label="لا توجد طلبات بعد" /> : orders.map((o) => <OrderCard key={o.id} order={o} />))}
+
+        {!loading && !error && tab === "users" && (
           <div className="bg-white rounded-2xl shadow-sm divide-y">
             {users.map((u) => (
               <div key={u.id} className="p-3 flex justify-between text-sm">
@@ -118,7 +187,7 @@ export default function AdminDashboard({ user, onLogout }: { user: User; onLogou
           </div>
         )}
 
-        {tab === "settings" && settings && (
+        {!loading && !error && tab === "settings" && settings && (
           <form onSubmit={saveSettings} className="bg-white rounded-2xl p-5 shadow-sm space-y-3">
             {Object.entries(settings).map(([k, v]) => (
               <div key={k}>
@@ -135,10 +204,23 @@ export default function AdminDashboard({ user, onLogout }: { user: User; onLogou
           </form>
         )}
 
-        {tab === "complaints" &&
-          complaints.map((c) => <ComplaintRow key={c.id} complaint={c} onRespond={(r) => respond(c.id, r)} />)}
+        {!loading && !error && tab === "complaints" &&
+          (complaints.length === 0 ? (
+            <EmptyState icon="✅" label="لا توجد شكاوى" />
+          ) : (
+            complaints.map((c) => <ComplaintRow key={c.id} complaint={c} onRespond={(r) => respond(c.id, r)} />)
+          ))}
       </section>
     </main>
+  );
+}
+
+function StatCard({ label, value, accent }: { label: string; value: number; accent?: "amber" }) {
+  return (
+    <div className="bg-white rounded-2xl p-4 shadow-sm">
+      <div className="text-slate-500 text-sm">{label}</div>
+      <div className={`text-2xl font-black ${accent === "amber" ? "text-amber-600" : "text-slate-900"}`}>{value}</div>
+    </div>
   );
 }
 

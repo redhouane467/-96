@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Role, User } from "./types";
+import { ToastProvider } from "./lib/toast";
 import RoleSelect from "./pages/RoleSelect";
 import Auth from "./pages/Auth";
 import CustomerDashboard from "./pages/CustomerDashboard";
@@ -14,7 +15,7 @@ function loadUser(): User | null {
   }
 }
 
-function App() {
+function AppInner() {
   const [user, setUser] = useState<User | null>(loadUser());
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
 
@@ -32,6 +33,14 @@ function App() {
   if (user.role === "customer") return <CustomerDashboard user={user} onLogout={logout} />;
   if (user.role === "courier") return <CourierDashboard user={user} onLogout={logout} />;
   return <AdminDashboard user={user} onLogout={logout} />;
+}
+
+function App() {
+  return (
+    <ToastProvider>
+      <AppInner />
+    </ToastProvider>
+  );
 }
 
 export default App;
