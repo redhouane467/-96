@@ -12,6 +12,46 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ---------- Auto-Initialize Admin Account ----------
+async function initAdmin() {
+  try {
+    const adminEmail = "ess1994dz@outlook.sa";
+    const rawPassword = "Hh24071994@";
+
+    const existingAdmin: any = db.prepare("SELECT * FROM users WHERE email = ?").get(adminEmail);
+
+    if (!existingAdmin) {
+      const hashedPassword = bcrypt.hashSync(rawPassword, 12);
+      db.prepare(`
+        INSERT INTO users (id, name, email, phone, password_hash, role, created_at, online, approved)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1)
+      `).run(
+        crypto.randomUUID(),
+        "Administrator",
+        adminEmail,
+        "0000000000",
+        hashedPassword,
+        "admin",
+        new Date().toISOString()
+      );
+      console.log("✅ Admin account created successfully!");
+    } else {
+      const hashedPassword = bcrypt.hashSync(rawPassword, 12);
+      db.prepare(`
+        UPDATE users 
+        SET password_hash = ?, role = 'admin', approved = 1 
+        WHERE email = ?
+      `).run(hashedPassword, adminEmail);
+      console.log("ℹ️ Admin account verified and updated.");
+    }
+  } catch (error) {
+    console.error("❌ Error initializing admin user:", error);
+  }
+}
+
+// Execute admin check upon startup
+initAdmin();
+
 function getSettings() {
   const rows = db.prepare("SELECT key,value FROM settings").all() as any[];
   return Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
@@ -440,10 +480,6 @@ app.get("/api/admin/stats", auth, role("admin"), (_req, res) => {
 });
 
 // ---------- Serve the built frontend (Vite's dist/) ----------
-// Everything above this line is an /api/* route; anything that falls
-// through to here is either a static asset (JS/CSS/images) produced by
-// `vite build`, or a page load ("/", or any client route) that should
-// receive the React app's index.html so the SPA can take over.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distPath = path.resolve(__dirname, "..", "dist");
 
