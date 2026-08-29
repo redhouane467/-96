@@ -339,12 +339,12 @@ app.post("/api/orders/:id/cancel", auth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ✅ تم تعديل هذا المسار: تم إلغاء فحص الرمز ليتأكد التوصيل مباشرة
 app.post("/api/orders/:id/deliver", auth, role("courier"), (req, res) => {
   const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
   if (!o || o.courier_id !== req.user!.id) return res.status(404).json({ error: "الطلب غير موجود" });
   if (o.status !== "picked_up") return res.status(409).json({ error: "حالة الطلب غير صالحة" });
-  if (String(req.body.confirmation_code || "") !== o.confirmation_code)
-    return res.status(400).json({ error: "رمز التأكيد غير صحيح" });
+
   db.prepare("UPDATE orders SET status='delivered',updated_at=? WHERE id=?").run(new Date().toISOString(), req.params.id);
   recordStatus(req.params.id, "delivered");
   res.json({ ok: true });
