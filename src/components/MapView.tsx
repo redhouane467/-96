@@ -21,7 +21,7 @@ type MapViewProps = {
   className?: string;
 };
 
-const DEFAULT_CENTER: [number, number] = [36.7538, 3.0588]; // Algiers, as a sane fallback
+const DEFAULT_CENTER: [number, number] = [36.7538, 3.0588]; // Algiers
 
 function buildIcon(color: string, emoji?: string) {
   return L.divIcon({
@@ -55,17 +55,26 @@ export default function MapView({
   const onClickRef = useRef(onMapClick);
   onClickRef.current = onMapClick;
 
-  // Create the map once.
+  // 1. Create the map once
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
+    
     const initialCenter = center || (markers[0] ? [markers[0].lat, markers[0].lng] : DEFAULT_CENTER);
     const map = L.map(containerRef.current, { zoomControl: true }).setView(initialCenter, zoom);
+
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       maxZoom: 19,
     }).addTo(map);
+
     map.on("click", (e: L.LeafletMouseEvent) => onClickRef.current?.(e.latlng.lat, e.latlng.lng));
     mapRef.current = map;
+
+    // Fix gray tiles / bad container rendering
+    setTimeout(() => {
+      map.invalidateSize();
+    }, 200);
+
     return () => {
       map.remove();
       mapRef.current = null;
@@ -75,7 +84,15 @@ export default function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync markers.
+  // 2. Center map when `center` prop explicitly changes (e.g., when clicking "Find My Location")
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !center) return;
+    map.setView(center, zoom, { animate: true });
+    map.invalidateSize();
+  }, [center, zoom]);
+
+  // 3. Sync markers
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -102,22 +119,19 @@ export default function MapView({
       }
     }
 
-    // Only re-fit the view when the SET of markers changes (new/removed
-    // pins) — not on every position tick — so live location updates pan
-    // smoothly instead of jumping/re-zooming on each refresh.
     const idsKey = [...seen].sort().join(",");
     if (idsKey !== lastMarkerIdsRef.current) {
       lastMarkerIdsRef.current = idsKey;
-      if (markers.length === 1) {
+      if (markers.length === 1 && !center) {
         map.setView([markers[0].lat, markers[0].lng], zoom);
       } else if (markers.length > 1) {
         const bounds = L.latLngBounds(markers.map((m) => [m.lat, m.lng] as [number, number]));
         map.fitBounds(bounds, { padding: [30, 30] });
       }
     }
-  }, [markers, zoom]);
+  }, [markers, zoom, center]);
 
-  // Sync route line.
+  // 4. Sync route line
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -126,7 +140,12 @@ export default function MapView({
       routeRef.current = null;
     }
     if (routeCoords && routeCoords.length > 1) {
-      routeRef.current = L.polyline(routeCoords, { color: "#16a34a", weight: 4, opacity: 0.8, dashArray: "6 6" }).addTo(map);
+      routeRef.current = L.polyline(routeCoords, {
+        color: "#16a34a",
+        weight: 4,
+        opacity: 0.8,
+        dashArray: "6 6",
+      }).addTo(map);
     }
   }, [routeCoords]);
 
