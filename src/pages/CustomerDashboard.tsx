@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { api } from "../lib/api";
-import { getCurrentPosition, haversineKm } from "../lib/geolocation";
+import { haversineKm } from "../lib/geolocation";
 import { useToast } from "../lib/toast";
 import type { Complaint, Order, User } from "../types";
 import Header from "../components/Header";
@@ -149,6 +149,7 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
   const toast = useToast();
   const [pickup, setPickup] = useState<{ lat: number; lng: number } | null>(null);
   const [delivery, setDelivery] = useState<{ lat: number; lng: number } | null>(null);
+  const [mapCenter, setMapCenter] = useState<[number, number] | undefined>(undefined);
   const [pickingMode, setPickingMode] = useState<"pickup" | "delivery">("pickup");
   const [pickupAddress, setPickupAddress] = useState("");
   const [deliveryAddress, setDeliveryAddress] = useState("");
@@ -172,18 +173,38 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
     }
   }
 
-  async function useMyLocation() {
-    setLocating(true);
-    try {
-      const c = await getCurrentPosition();
-      setPickup(c);
-      setPickingMode("delivery");
-      toast("تم تحديد موقعك الحالي كنقطة استلام", "success");
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "تعذّر تحديد الموقع", "error");
-    } finally {
-      setLocating(false);
+  // 📍 دالة التقاط الموقع المباشرة والمحسّنة للهواتف
+  function useMyLocation() {
+    if (!navigator.geolocation) {
+      toast("المتصفح لا يدعم تحديد الموقع الجغرافي", "error");
+      return;
     }
+
+    setLocating(true);
+
+    const options: PositionOptions = {
+      enableHighAccuracy: false, // لضمان سرعة الاستجابة والعمل داخل المباني عبر الشبكة
+      timeout: 15000,
+      maximumAge: 30000,
+    };
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        setPickup({ lat, lng });
+        setMapCenter([lat, lng]); // 👈 تحريك الخريطة فوراً للموقع
+        setPickingMode("delivery");
+        setLocating(false);
+        toast("تم تحديد موقعك الحالي كنقطة استلام", "success");
+      },
+      (error) => {
+        console.error("Geolocation Error:", error);
+        setLocating(false);
+        toast("تعذر التقاط الموقع تلقائياً. يمكنك الضغط مباشرة على الخريطة لتحديده.", "error");
+      },
+      options
+    );
   }
 
   async function submit(e: FormEvent) {
@@ -236,7 +257,7 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
             {locating ? "..." : "📍 موقعي الحالي"}
           </button>
         </div>
-        <MapView markers={markers} onMapClick={handleMapClick} height="240px" />
+        <MapView markers={markers} center={mapCenter} onMapClick={handleMapClick} height="240px" />
         <div className="flex gap-2 text-xs">
           <button
             type="button"
