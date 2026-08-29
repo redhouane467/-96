@@ -89,8 +89,14 @@ export default function OrderTracking({ orderId, onClose }: { orderId: string; o
         ‹ رجوع لطلباتي
       </button>
 
-      {markers.length > 0 && <MapView markers={markers} routeCoords={route} height="220px" />}
-
+      {markers.length > 0 && (
+  <MapView 
+    markers={markers} 
+    routeCoords={route} 
+    center={[markers[0].lat, markers[0].lng]} 
+    height="220px" 
+  />
+)}
       {order.status === "pending" && (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-center">
           <div className="animate-pulse text-amber-800 font-bold">🔍 جاري البحث عن مندوب…</div>
