@@ -50,12 +50,13 @@ export default function CustomerDashboard({ user, onLogout }: { user: User; onLo
   async function cancelOrder(id: string) {
     try {
       await api(`/orders/${id}/cancel`, { method: "POST" });
-      toast("تم إلغاء الطلب", "success");
+      toast("تم إلغاء الطلب بنجاح", "success");
       loadOrders();
     } catch (e) {
-      toast(e instanceof Error ? e.message : "خطأ", "error");
+      toast(e instanceof Error ? e.message : "خطأ في إلغاء الطلب", "error");
     }
   }
+
   async function rate(id: string, stars: number) {
     try {
       await api(`/orders/${id}/rate`, { method: "POST", body: JSON.stringify({ stars }) });
@@ -124,16 +125,22 @@ export default function CustomerDashboard({ user, onLogout }: { user: User; onLo
           ) : (
             orders.map((o) => (
               <OrderCard key={o.id} order={o}>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t mt-2">
                   <button onClick={() => setTrackingId(o.id)} className="text-green-700 text-sm font-bold">
                     تتبع الطلب ‹
                   </button>
-                  {o.status === "pending" && (
-                    <button onClick={() => cancelOrder(o.id)} className="text-red-600 text-sm font-bold">
-                      إلغاء الطلب
+
+                  {/* ✅ السماح بإلغاء الطلب إذا كان قيد الانتظار أو تم قبوله فقط */}
+                  {["pending", "accepted"].includes(o.status) && (
+                    <button
+                      onClick={() => cancelOrder(o.id)}
+                      className="bg-red-50 text-red-600 px-3 py-1.5 rounded-lg text-xs font-bold border border-red-200 hover:bg-red-100 transition"
+                    >
+                      إلغاء الطلب ❌
                     </button>
                   )}
                 </div>
+
                 {o.status === "delivered" && <RateBox onRate={(s) => rate(o.id, s)} />}
               </OrderCard>
             ))
@@ -173,7 +180,6 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
     }
   }
 
-  // 📍 دالة التقاط الموقع المباشرة والمحسّنة للهواتف
   function useMyLocation() {
     if (!navigator.geolocation) {
       toast("المتصفح لا يدعم تحديد الموقع الجغرافي", "error");
@@ -183,7 +189,7 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
     setLocating(true);
 
     const options: PositionOptions = {
-      enableHighAccuracy: false, // لضمان سرعة الاستجابة والعمل داخل المباني عبر الشبكة
+      enableHighAccuracy: false,
       timeout: 15000,
       maximumAge: 30000,
     };
@@ -193,7 +199,7 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
         const lat = position.coords.latitude;
         const lng = position.coords.longitude;
         setPickup({ lat, lng });
-        setMapCenter([lat, lng]); // 👈 تحريك الخريطة فوراً للموقع
+        setMapCenter([lat, lng]);
         setPickingMode("delivery");
         setLocating(false);
         toast("تم تحديد موقعك الحالي كنقطة استلام", "success");
@@ -298,7 +304,7 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
         />
         <input
           className="w-full border rounded-xl p-3"
-          placeholder="وصف الطرد (اختياري)"
+          placeholder="وصف الطرد / نوع الطلب (مثال: شراء طعام، فواكه، وثائق)"
           value={packageDescription}
           onChange={(e) => setPackageDescription(e.target.value)}
         />
@@ -310,7 +316,7 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
         />
         <textarea
           className="w-full border rounded-xl p-3"
-          placeholder="ملاحظات (اختياري)"
+          placeholder="ملاحظات إضافية (اختياري)"
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
         />
@@ -339,7 +345,7 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
 function RateBox({ onRate }: { onRate: (stars: number) => void }) {
   const [sent, setSent] = useState(false);
   return (
-    <div className="space-y-1">
+    <div className="space-y-1 mt-2 pt-2 border-t">
       <p className="text-sm text-slate-600">قيّم المندوب</p>
       <div className="flex gap-1">
         {[1, 2, 3, 4, 5].map((n) => (
