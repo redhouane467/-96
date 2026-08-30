@@ -1,56 +1,43 @@
-import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import type { Role } from "../types";
 
-export default function RoleSelect() {
-  const navigate = useNavigate();
+const ROLES: { role: Role; label: string; emoji: string; hint: string }[] = [
+  { role: "customer", label: "عميل", emoji: "👤", hint: "أطلب توصيل طلبك" },
+  { role: "courier", label: "مندوب", emoji: "🛵", hint: "وصّل الطلبات واربح" },
+  { role: "admin", label: "مدير", emoji: "👨‍💼", hint: "لوحة إدارة المنصة" },
+];
 
-  // دالة التوجيه عند الضغط على أي زر
-  const handleSelectRole = (roleName: string, targetPath: string) => {
-    localStorage.setItem('role', roleName);
-    navigate(targetPath);
-  };
-
+export default function RoleSelect({ onSelect }: { onSelect: (role: Role) => void }) {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4 text-white">
-      <div className="max-w-md w-full space-y-8 bg-slate-800/80 backdrop-blur-md p-8 rounded-2xl border border-slate-700 shadow-2xl">
-        <div className="text-center">
-          <h2 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-            اختر نوع الحساب
-          </h2>
-          <p className="mt-2 text-sm text-slate-400">
-            حدد صفقتك للوصول إلى لوحة التحكم الخاصة بك
-          </p>
+    <main className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-b from-green-50 to-slate-50">
+      <div className="w-full max-w-sm space-y-8">
+        <div className="text-center space-y-3">
+          <img
+            src="/icon-192.png"
+            alt="وصلي"
+            className="mx-auto w-24 h-24 rounded-3xl shadow-lg shadow-green-900/10"
+          />
+          <h1 className="text-4xl font-black text-slate-900">وصلي</h1>
+          <p className="text-slate-500">توصيل سريع وبسيط</p>
         </div>
 
-        <div className="space-y-4 pt-4">
-          {/* زر الأدمن */}
-          <button
-            onClick={() => handleSelectRole('admin', '/admin')}
-            className="w-full py-4 px-6 rounded-xl bg-slate-700/50 hover:bg-blue-600/30 border border-slate-600 hover:border-blue-500/50 transition-all duration-200 flex items-center justify-between group"
-          >
-            <span className="font-semibold text-slate-200 group-hover:text-white">إدارة النظام</span>
-            <span className="text-xs bg-blue-500/20 text-blue-300 px-3 py-1 rounded-full border border-blue-500/30">Admin</span>
-          </button>
-
-          {/* زر العميل */}
-          <button
-            onClick={() => handleSelectRole('customer', '/customer')}
-            className="w-full py-4 px-6 rounded-xl bg-slate-700/50 hover:bg-emerald-600/30 border border-slate-600 hover:border-emerald-500/50 transition-all duration-200 flex items-center justify-between group"
-          >
-            <span className="font-semibold text-slate-200 group-hover:text-white">لوحة العميل</span>
-            <span className="text-xs bg-emerald-500/20 text-emerald-300 px-3 py-1 rounded-full border border-emerald-500/30">Customer</span>
-          </button>
-
-          {/* زر المندوب */}
-          <button
-            onClick={() => handleSelectRole('courier', '/courier')}
-            className="w-full py-4 px-6 rounded-xl bg-slate-700/50 hover:bg-purple-600/30 border border-slate-600 hover:border-purple-500/50 transition-all duration-200 flex items-center justify-between group"
-          >
-            <span className="font-semibold text-slate-200 group-hover:text-white">لوحة المندوب</span>
-            <span className="text-xs bg-purple-500/20 text-purple-300 px-3 py-1 rounded-full border border-purple-500/30">Courier</span>
-          </button>
+        <div className="space-y-4">
+          <p className="text-center text-slate-600 font-medium">اختر نوع الحساب للمتابعة</p>
+          {ROLES.map(({ role, label, emoji, hint }) => (
+            <button
+              key={role}
+              onClick={() => onSelect(role)}
+              className="w-full flex items-center gap-4 bg-white rounded-2xl p-5 shadow-sm border border-slate-100 active:scale-[0.98] active:bg-green-50 transition"
+            >
+              <span className="text-4xl leading-none">{emoji}</span>
+              <span className="flex-1 text-right">
+                <span className="block text-xl font-bold text-slate-900">{label}</span>
+                <span className="block text-sm text-slate-500">{hint}</span>
+              </span>
+              <span className="text-green-600 text-2xl">‹</span>
+            </button>
+          ))}
         </div>
       </div>
-    </div>
+    </main>
   );
 }
