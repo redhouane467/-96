@@ -1,43 +1,88 @@
-import type { Role } from "../types";
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
-const ROLES: { role: Role; label: string; emoji: string; hint: string }[] = [
-  { role: "customer", label: "عميل", emoji: "👤", hint: "أطلب توصيل طلبك" },
-  { role: "courier", label: "مندوب", emoji: "🛵", hint: "وصّل الطلبات واربح" },
-  { role: "admin", label: "مدير", emoji: "👨‍💼", hint: "لوحة إدارة المنصة" },
-];
+export default function RoleSelect() {
+  const navigate = useNavigate();
 
-export default function RoleSelect({ onSelect }: { onSelect: (role: Role) => void }) {
+  const handleSelectRole = (role: string, path: string) => {
+    // حفظ الدور في localStorage
+    localStorage.setItem('role', role);
+    // التوجيه المباشر للصفحة المطلوبة
+    navigate(path);
+  };
+
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-b from-green-50 to-slate-50">
-      <div className="w-full max-w-sm space-y-8">
-        <div className="text-center space-y-3">
-          <img
-            src="/icon-192.png"
-            alt="وصلي"
-            className="mx-auto w-24 h-24 rounded-3xl shadow-lg shadow-green-900/10"
-          />
-          <h1 className="text-4xl font-black text-slate-900">وصلي</h1>
-          <p className="text-slate-500">توصيل سريع وبسيط</p>
-        </div>
+    <div style={{ 
+      display: 'flex', 
+      flexDirection: 'column', 
+      alignItems: 'center', 
+      justifyContent: 'center', 
+      minHeight: '100vh', 
+      fontFamily: 'sans-serif',
+      direction: 'rtl',
+      backgroundColor: '#f4f6f8'
+    }}>
+      <div style={{
+        backgroundColor: '#fff',
+        padding: '30px',
+        borderRadius: '8px',
+        boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
+        textAlign: 'center',
+        maxWidth: '400px',
+        width: '90%'
+      }}>
+        <h2 style={{ marginBottom: '20px', color: '#333' }}>اختر نوع الحساب للدخول</h2>
+        
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+          <button
+            onClick={() => handleSelectRole('customer', '/customer')}
+            style={{
+              padding: '12px 20px',
+              fontSize: '16px',
+              backgroundColor: '#28a745',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            دخول كـ عميل (Customer)
+          </button>
 
-        <div className="space-y-4">
-          <p className="text-center text-slate-600 font-medium">اختر نوع الحساب للمتابعة</p>
-          {ROLES.map(({ role, label, emoji, hint }) => (
-            <button
-              key={role}
-              onClick={() => onSelect(role)}
-              className="w-full flex items-center gap-4 bg-white rounded-2xl p-5 shadow-sm border border-slate-100 active:scale-[0.98] active:bg-green-50 transition"
-            >
-              <span className="text-4xl leading-none">{emoji}</span>
-              <span className="flex-1 text-right">
-                <span className="block text-xl font-bold text-slate-900">{label}</span>
-                <span className="block text-sm text-slate-500">{hint}</span>
-              </span>
-              <span className="text-green-600 text-2xl">‹</span>
-            </button>
-          ))}
+          <button
+            onClick={() => handleSelectRole('courier', '/courier')}
+            style={{
+              padding: '12px 20px',
+              fontSize: '16px',
+              backgroundColor: '#17a2b8',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            دخول كـ مندوب (Courier)
+          </button>
+
+          <button
+            onClick={() => handleSelectRole('admin', '/admin')}
+            style={{
+              padding: '12px 20px',
+              fontSize: '16px',
+              backgroundColor: '#007bff',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            دخول كـ مدير (Admin)
+          </button>
         </div>
       </div>
-    </main>
+    </div>
   );
 }
