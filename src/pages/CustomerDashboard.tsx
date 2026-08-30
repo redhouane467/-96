@@ -130,7 +130,7 @@ export default function CustomerDashboard({ user, onLogout }: { user: User; onLo
                     تتبع الطلب ‹
                   </button>
 
-                  {/* ✅ السماح بإلغاء الطلب إذا كان قيد الانتظار أو تم قبوله فقط */}
+                  {/* إمكانية إلغاء الطلب إذا كان قيد الانتظار أو مقبواً */}
                   {["pending", "accepted"].includes(o.status) && (
                     <button
                       onClick={() => cancelOrder(o.id)}
@@ -160,9 +160,8 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
   const [pickingMode, setPickingMode] = useState<"pickup" | "delivery">("pickup");
   const [pickupAddress, setPickupAddress] = useState("");
   const [deliveryAddress, setDeliveryAddress] = useState("");
-  const [packageDescription, setPackageDescription] = useState("");
+  const [orderDescription, setOrderDescription] = useState("");
   const [recipientPhone, setRecipientPhone] = useState("");
-  const [notes, setNotes] = useState("");
   const [suggest, setSuggest] = useState(false);
   const [price, setPrice] = useState(150);
   const [submitting, setSubmitting] = useState(false);
@@ -220,9 +219,14 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
       return;
     }
     if (!pickupAddress.trim() || !deliveryAddress.trim()) {
-      toast("أدخل وصفًا لعنوان الاستلام والتسليم", "error");
+      toast("أدخل عنوان الاستلام والتسليم", "error");
       return;
     }
+    if (!orderDescription.trim()) {
+      toast("يرجى كتابة شرح الطلب", "error");
+      return;
+    }
+
     setSubmitting(true);
     try {
       await api("/orders", {
@@ -234,9 +238,8 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
           pickup_lng: pickup.lng,
           delivery_lat: delivery.lat,
           delivery_lng: delivery.lng,
-          package_description: packageDescription || null,
+          package_description: orderDescription,
           recipient_phone: recipientPhone || null,
-          notes: notes || null,
           offered_price: suggest ? price : null,
         }),
       });
@@ -290,36 +293,35 @@ function NewOrderForm({ onCreated }: { onCreated: () => void }) {
       <div className="bg-white rounded-2xl p-5 shadow-sm space-y-3">
         <input
           className="w-full border rounded-xl p-3"
-          placeholder="وصف عنوان الاستلام (مثال: بجانب صيدلية النور)"
+          placeholder="عنوان الاستلام (مثال: المطعم الفلاني / صيدلية النور)"
           required
           value={pickupAddress}
           onChange={(e) => setPickupAddress(e.target.value)}
         />
         <input
           className="w-full border rounded-xl p-3"
-          placeholder="وصف عنوان التسليم"
+          placeholder="عنوان التسليم (مثال: حي السلام عمارة 5)"
           required
           value={deliveryAddress}
           onChange={(e) => setDeliveryAddress(e.target.value)}
         />
-        <input
-          className="w-full border rounded-xl p-3"
-          placeholder="وصف الطرد / نوع الطلب (مثال: شراء طعام، فواكه، وثائق)"
-          value={packageDescription}
-          onChange={(e) => setPackageDescription(e.target.value)}
+        
+        {/* حقل واحد موحد لشرح الطلب */}
+        <textarea
+          className="w-full border rounded-xl p-3 min-h-[100px]"
+          placeholder="شرح الطلب (مثال: شراء وجبة غداء من المطعم وتوصيلها، أو شراء دواء معين...)"
+          required
+          value={orderDescription}
+          onChange={(e) => setOrderDescription(e.target.value)}
         />
+
         <input
           className="w-full border rounded-xl p-3"
           placeholder="هاتف المستلم (اختياري)"
           value={recipientPhone}
           onChange={(e) => setRecipientPhone(e.target.value)}
         />
-        <textarea
-          className="w-full border rounded-xl p-3"
-          placeholder="ملاحظات إضافية (اختياري)"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-        />
+        
         <p className="text-xs text-slate-500">150 دج حتى 2 كم، ثم +50 دج لكل كم إضافي</p>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={suggest} onChange={(e) => setSuggest(e.target.checked)} />
