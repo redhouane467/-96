@@ -2,9 +2,8 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 
-const dbDirectory = process.env.NODE_ENV === "production" ? "/tmp/data" : "data";
-fs.mkdirSync(dbDirectory, { recursive: true });
-export const db = new Database(path.join(dbDirectory, "wassli.sqlite"));
+fs.mkdirSync("data", { recursive: true });
+export const db = new Database(path.resolve("data/wassli.sqlite"));
 db.pragma("journal_mode=WAL");
 
 db.exec(`

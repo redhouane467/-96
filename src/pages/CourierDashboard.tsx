@@ -1,5 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { User } from "../types";
+import { api } from "../lib/api";
+import { watchPosition } from "../lib/geolocation";
 import { useToast } from "../lib/toast";
 
 interface Order {
@@ -22,26 +24,35 @@ interface Stats {
   courierEarnings: number;
 }
 
+const LOCATION_SEND_INTERVAL_MS = 15000;
+
 export default function CourierDashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [orders, setOrders] = useState<Order[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"available" | "my_orders" | "stats">("available");
-  const { showToast } = useToast();
+  const [online, setOnline] = useState(false);
+  const [approved, setApproved] = useState<boolean | null>(null);
+  const toast = useToast();
+  const lastSentRef = useRef(0);
+  const stopWatchRef = useRef<(() => void) | null>(null);
 
-  const token = localStorage.getItem("wassli_token");
+  const fetchMe = async () => {
+    try {
+      const me = await api<{ approved: boolean; online: boolean }>("/auth/me");
+      setApproved(me.approved);
+      setOnline(me.online);
+    } catch {
+      // non-critical
+    }
+  };
 
   const fetchOrders = async () => {
     try {
-      const res = await fetch("/api/orders", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setOrders(data.orders || []);
-      }
+      const data = await api<{ orders: Order[] }>("/orders");
+      setOrders(data.orders || []);
     } catch {
-      showToast("خطأ في تحميل الطلبات", "error");
+      toast("خطأ في تحميل الطلبات", "error");
     } finally {
       setLoading(false);
     }
@@ -49,44 +60,70 @@ export default function CourierDashboard({ user, onLogout }: { user: User; onLog
 
   const fetchStats = async () => {
     try {
-      const res = await fetch("/api/couriers/me/stats", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setStats(data);
-      }
+      const data = await api<Stats>("/couriers/me/stats");
+      setStats(data);
     } catch {
       // Ignore fallback
     }
   };
 
   useEffect(() => {
+    fetchMe();
     fetchOrders();
     fetchStats();
   }, []);
 
-  const handleAction = async (orderId: string, action: "accept" | "pickup" | "deliver" | "cancel") => {
+  const toggleOnline = async () => {
+    const next = !online;
     try {
-      const res = await fetch(`/api/orders/${orderId}/${action}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (res.ok) {
-        showToast(data.message || "تم تحديث حالة الطلب بنجاح", "success");
-        fetchOrders();
-        fetchStats();
-      } else {
-        showToast(data.error || "حدث خطأ ما", "error");
-      }
-    } catch {
-      showToast("فشل الاتصال بالسيرفر", "error");
+      await api("/couriers/me/status", { method: "PATCH", body: JSON.stringify({ online: next }) });
+      setOnline(next);
+      toast(next ? "أنت الآن متصل" : "أنت الآن غير متصل", "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "حدث خطأ ما", "error");
+    }
+  };
+
+  // While online, keep sending the courier's live location (throttled) so
+  // customers can see it once assigned, and so "nearby couriers" search
+  // works. Stops immediately when toggled offline or on unmount.
+  useEffect(() => {
+    if (!online) {
+      stopWatchRef.current?.();
+      stopWatchRef.current = null;
+      return;
+    }
+    stopWatchRef.current = watchPosition(
+      (coords) => {
+        const now = Date.now();
+        if (now - lastSentRef.current < LOCATION_SEND_INTERVAL_MS) return;
+        lastSentRef.current = now;
+        api("/couriers/me/location", { method: "PATCH", body: JSON.stringify(coords) }).catch(() => {});
+      },
+      (err) => toast(err.message, "error")
+    );
+    return () => {
+      stopWatchRef.current?.();
+      stopWatchRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [online]);
+
+  const handleAction = async (orderId: string, action: "accept" | "pickup" | "deliver" | "unassign") => {
+    try {
+      await api(`/orders/${orderId}/${action}`, { method: "POST" });
+      toast("تم تحديث حالة الطلب بنجاح", "success");
+      fetchOrders();
+      fetchStats();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "حدث خطأ ما", "error");
     }
   };
 
   const availableOrders = orders.filter((o) => o.status === "pending");
   const myOrders = orders.filter((o) => o.status !== "pending");
+
+
 
   return (
     <div className="min-h-screen bg-gray-50 dir-rtl p-4 font-sans">
@@ -98,6 +135,28 @@ export default function CourierDashboard({ user, onLogout }: { user: User; onLog
         </div>
         <button onClick={onLogout} className="bg-red-50 text-red-600 px-3 py-1.5 rounded-lg text-sm font-medium">
           تأكيد الخروج
+        </button>
+      </div>
+
+      {approved === false && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 mb-4 text-center text-sm font-bold">
+          ⏳ حسابك بانتظار اعتماد الإدارة — لن تتمكن من قبول الطلبات حتى تتم الموافقة
+        </div>
+      )}
+
+      <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm mb-4">
+        <div>
+          <p className="font-bold text-gray-800">حالتك</p>
+          <p className="text-sm text-gray-500">{online ? "متصل — تظهر لك الطلبات القريبة" : "غير متصل"}</p>
+        </div>
+        <button
+          onClick={toggleOnline}
+          disabled={approved === false}
+          className={`px-5 py-2 rounded-full font-bold text-sm transition disabled:opacity-40 ${
+            online ? "bg-emerald-600 text-white" : "bg-gray-200 text-gray-600"
+          }`}
+        >
+          {online ? "متصل ●" : "غير متصل"}
         </button>
       </div>
 
@@ -186,7 +245,8 @@ export default function CourierDashboard({ user, onLogout }: { user: User; onLog
                 {order.status === "pending" && (
                   <button
                     onClick={() => handleAction(order.id, "accept")}
-                    className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-emerald-700"
+                    disabled={approved === false}
+                    className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-emerald-700 disabled:opacity-40"
                   >
                     قبول الطلب
                   </button>
@@ -200,7 +260,7 @@ export default function CourierDashboard({ user, onLogout }: { user: User; onLog
                       تم استلام الشحنة
                     </button>
                     <button
-                      onClick={() => handleAction(order.id, "cancel")}
+                      onClick={() => handleAction(order.id, "unassign")}
                       className="bg-red-50 text-red-600 px-3 py-2 rounded-lg font-bold text-sm border border-red-200"
                     >
                       إلغاء التكليف
