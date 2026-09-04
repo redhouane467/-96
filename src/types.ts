@@ -3,7 +3,7 @@ export type Role = "customer" | "courier" | "admin";
 export type User = {
   id: string;
   name: string;
-  email: string;
+  email?: string | null;
   phone: string;
   role: Role;
 };
