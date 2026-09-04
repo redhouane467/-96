@@ -81,19 +81,23 @@ async function init() {
     );
   `);
 
-  // Existing PostgreSQL databases created with the previous schema
-  // had email as NOT NULL. Make it optional without deleting data.
+  // البريد الإلكتروني أصبح اختياريًا.
   await pool.query(
     "ALTER TABLE users ALTER COLUMN email DROP NOT NULL"
   );
 
-  async function columnExists(table: string, column: string): Promise<boolean> {
+  async function columnExists(
+    table: string,
+    column: string
+  ): Promise<boolean> {
     const result = await pool.query(
       `SELECT column_name
        FROM information_schema.columns
-       WHERE table_name = $1 AND column_name = $2`,
+       WHERE table_name = $1
+         AND column_name = $2`,
       [table, column]
     );
+
     return result.rows.length > 0;
   }
 
@@ -109,45 +113,128 @@ async function init() {
     }
   }
 
-  await addColumnIfMissing("users", "online", "INTEGER NOT NULL DEFAULT 0");
-  await addColumnIfMissing("users", "approved", "INTEGER NOT NULL DEFAULT 0");
+  // أعمدة users القديمة والجديدة.
+  await addColumnIfMissing(
+    "users",
+    "online",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
+
+  await addColumnIfMissing(
+    "users",
+    "approved",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
+
   await addColumnIfMissing("users", "lat", "REAL");
   await addColumnIfMissing("users", "lng", "REAL");
-  await addColumnIfMissing("users", "location_updated_at", "TEXT");
-  await addColumnIfMissing("users", "id_card_data", "BYTEA");
-  await addColumnIfMissing("users", "id_card_mime", "TEXT");
 
-  await addColumnIfMissing("orders", "pickup_lat", "REAL");
-  await addColumnIfMissing("orders", "pickup_lng", "REAL");
-  await addColumnIfMissing("orders", "delivery_lat", "REAL");
-  await addColumnIfMissing("orders", "delivery_lng", "REAL");
-  await addColumnIfMissing("orders", "package_description", "TEXT");
-  await addColumnIfMissing("orders", "recipient_phone", "TEXT");
-  await addColumnIfMissing("orders", "notes", "TEXT");
-
-  await pool.query(
-    "CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique ON users(phone)"
+  await addColumnIfMissing(
+    "users",
+    "location_updated_at",
+    "TEXT"
   );
 
-  await pool.query(
-    "INSERT INTO settings(key,value) VALUES('base_price','150') ON CONFLICT(key) DO NOTHING"
-  );
-  await pool.query(
-    "INSERT INTO settings(key,value) VALUES('base_distance_km','2') ON CONFLICT(key) DO NOTHING"
-  );
-  await pool.query(
-    "INSERT INTO settings(key,value) VALUES('extra_km_price','50') ON CONFLICT(key) DO NOTHING"
-  );
-  await pool.query(
-    "INSERT INTO settings(key,value) VALUES('commission_percent','20') ON CONFLICT(key) DO NOTHING"
-  );
-  await pool.query(
-    "INSERT INTO settings(key,value) VALUES('search_radius_km','10') ON CONFLICT(key) DO NOTHING"
+  await addColumnIfMissing(
+    "users",
+    "id_card_data",
+    "BYTEA"
   );
 
-  await pool.query(
-    "UPDATE users SET approved = 1 WHERE role IN ('customer','admin') AND approved = 0"
+  await addColumnIfMissing(
+    "users",
+    "id_card_mime",
+    "TEXT"
   );
+
+  // أعمدة orders القديمة والجديدة.
+  await addColumnIfMissing(
+    "orders",
+    "pickup_lat",
+    "REAL"
+  );
+
+  await addColumnIfMissing(
+    "orders",
+    "pickup_lng",
+    "REAL"
+  );
+
+  await addColumnIfMissing(
+    "orders",
+    "delivery_lat",
+    "REAL"
+  );
+
+  await addColumnIfMissing(
+    "orders",
+    "delivery_lng",
+    "REAL"
+  );
+
+  await addColumnIfMissing(
+    "orders",
+    "package_description",
+    "TEXT"
+  );
+
+  await addColumnIfMissing(
+    "orders",
+    "recipient_phone",
+    "TEXT"
+  );
+
+  await addColumnIfMissing(
+    "orders",
+    "notes",
+    "TEXT"
+  );
+
+  // لا ننشئ unique index على الهاتف هنا حتى لا يفشل
+  // تشغيل التطبيق إذا كانت قاعدة البيانات القديمة تحتوي
+  // على أرقام مكررة.
+  // التسجيل الجديد يتحقق من عدم تكرار رقم الهاتف.
+
+  await pool.query(`
+    INSERT INTO settings(key, value)
+    VALUES('base_price', '150')
+    ON CONFLICT(key) DO NOTHING
+  `);
+
+  await pool.query(`
+    INSERT INTO settings(key, value)
+    VALUES('base_distance_km', '2')
+    ON CONFLICT(key) DO NOTHING
+  `);
+
+  await pool.query(`
+    INSERT INTO settings(key, value)
+    VALUES('extra_km_price', '50')
+    ON CONFLICT(key) DO NOTHING
+  `);
+
+  await pool.query(`
+    INSERT INTO settings(key, value)
+    VALUES('commission_percent', '20')
+    ON CONFLICT(key) DO NOTHING
+  `);
+
+  await pool.query(`
+    INSERT INTO settings(key, value)
+    VALUES('search_radius_km', '10')
+    ON CONFLICT(key) DO NOTHING
+  `);
+
+  // العميل والمدير معتمدان تلقائيًا.
+  // المندوب يبقى بانتظار موافقة المدير.
+  await pool.query(`
+    UPDATE users
+    SET approved = 1
+    WHERE role IN ('customer', 'admin')
+      AND approved = 0
+  `);
 }
 
-init().catch(console.error);
+init().catch((error) => {
+  console.error("Database initialization error:", error);
+});
