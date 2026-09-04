@@ -4,6 +4,7 @@ import { pool } from "./db.js";
 
 const email = "ess1994dz@outlook.sa";
 const password = "Hh24071994@";
+const phone = "0559388440";
 
 async function seedAdmin() {
   try {
@@ -12,7 +13,16 @@ async function seedAdmin() {
       [email]
     );
 
-    if (!result.rows[0]) {
+    if (result.rows[0]) {
+      await pool.query(
+        `UPDATE users
+         SET phone=$1, role='admin', approved=1
+         WHERE email=$2`,
+        [phone, email]
+      );
+
+      console.log("Existing admin account updated successfully.");
+    } else {
       await pool.query(
         `INSERT INTO users(
           id,
@@ -30,7 +40,7 @@ async function seedAdmin() {
           crypto.randomUUID(),
           "مشرف وصلي",
           email,
-          "0000000000",
+          phone,
           bcrypt.hashSync(password, 12),
           "admin",
           new Date().toISOString()
@@ -38,15 +48,11 @@ async function seedAdmin() {
       );
 
       console.log("Admin account created successfully.");
-    } else {
-      console.log("Admin account already exists.");
     }
   } catch (error) {
-    console.error("Failed to create admin account:", error);
+    console.error("Failed to create/update admin account:", error);
     process.exitCode = 1;
-  } finally {
-    await pool.end();
   }
 }
 
-
+seedAdmin();
