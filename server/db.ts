@@ -11,7 +11,7 @@ async function init() {
     CREATE TABLE IF NOT EXISTS users(
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      email TEXT UNIQUE NOT NULL,
+      email TEXT UNIQUE,
       phone TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL,
@@ -20,7 +20,9 @@ async function init() {
       approved INTEGER NOT NULL DEFAULT 0,
       lat REAL,
       lng REAL,
-      location_updated_at TEXT
+      location_updated_at TEXT,
+      id_card_data BYTEA,
+      id_card_mime TEXT
     );
 
     CREATE TABLE IF NOT EXISTS orders(
@@ -79,6 +81,54 @@ async function init() {
     );
   `);
 
+  // Existing PostgreSQL databases created with the previous schema
+  // had email as NOT NULL. Make it optional without deleting data.
+  await pool.query(
+    "ALTER TABLE users ALTER COLUMN email DROP NOT NULL"
+  );
+
+  async function columnExists(table: string, column: string): Promise<boolean> {
+    const result = await pool.query(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_name = $1 AND column_name = $2`,
+      [table, column]
+    );
+    return result.rows.length > 0;
+  }
+
+  async function addColumnIfMissing(
+    table: string,
+    column: string,
+    definition: string
+  ) {
+    if (!(await columnExists(table, column))) {
+      await pool.query(
+        `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`
+      );
+    }
+  }
+
+  await addColumnIfMissing("users", "online", "INTEGER NOT NULL DEFAULT 0");
+  await addColumnIfMissing("users", "approved", "INTEGER NOT NULL DEFAULT 0");
+  await addColumnIfMissing("users", "lat", "REAL");
+  await addColumnIfMissing("users", "lng", "REAL");
+  await addColumnIfMissing("users", "location_updated_at", "TEXT");
+  await addColumnIfMissing("users", "id_card_data", "BYTEA");
+  await addColumnIfMissing("users", "id_card_mime", "TEXT");
+
+  await addColumnIfMissing("orders", "pickup_lat", "REAL");
+  await addColumnIfMissing("orders", "pickup_lng", "REAL");
+  await addColumnIfMissing("orders", "delivery_lat", "REAL");
+  await addColumnIfMissing("orders", "delivery_lng", "REAL");
+  await addColumnIfMissing("orders", "package_description", "TEXT");
+  await addColumnIfMissing("orders", "recipient_phone", "TEXT");
+  await addColumnIfMissing("orders", "notes", "TEXT");
+
+  await pool.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique ON users(phone)"
+  );
+
   await pool.query(
     "INSERT INTO settings(key,value) VALUES('base_price','150') ON CONFLICT(key) DO NOTHING"
   );
@@ -95,37 +145,6 @@ async function init() {
     "INSERT INTO settings(key,value) VALUES('search_radius_km','10') ON CONFLICT(key) DO NOTHING"
   );
 
-  // --- Additive migrations for databases created by earlier versions of ---
-  // --- this schema (existing deployments must not lose their data). ---
-  async function columnExists(table: string, column: string): Promise<boolean> {
-    const result = await pool.query(
-      "SELECT column_name FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
-      [table, column]
-    );
-    return result.rows.length > 0;
-  }
-  async function addColumnIfMissing(table: string, column: string, def: string) {
-    if (!(await columnExists(table, column))) {
-      await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
-    }
-  }
-  await addColumnIfMissing("users", "online", "INTEGER NOT NULL DEFAULT 0");
-  await addColumnIfMissing("users", "approved", "INTEGER NOT NULL DEFAULT 0");
-  await addColumnIfMissing("users", "lat", "REAL");
-  await addColumnIfMissing("users", "lng", "REAL");
-  await addColumnIfMissing("users", "location_updated_at", "TEXT");
-  await addColumnIfMissing("orders", "pickup_lat", "REAL");
-  await addColumnIfMissing("orders", "pickup_lng", "REAL");
-  await addColumnIfMissing("orders", "delivery_lat", "REAL");
-  await addColumnIfMissing("orders", "delivery_lng", "REAL");
-  await addColumnIfMissing("orders", "package_description", "TEXT");
-  await addColumnIfMissing("orders", "recipient_phone", "TEXT");
-  await addColumnIfMissing("orders", "notes", "TEXT");
-
-  // Customers and admins are always considered "approved" (the approval
-  // gate only exists to let admins vet new couriers before they can accept
-  // orders). Existing couriers from before this feature default to
-  // unapproved until an admin reviews them, matching the new safety rule.
   await pool.query(
     "UPDATE users SET approved = 1 WHERE role IN ('customer','admin') AND approved = 0"
   );
