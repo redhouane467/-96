@@ -49,4 +49,4 @@ async function seedAdmin() {
   }
 }
 
-seedAdmin();
+
