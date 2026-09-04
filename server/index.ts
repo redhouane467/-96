@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { db } from "./db.js";
+import { pool } from "./db.js";
 import { auth, role, sign } from "./auth.js";
 import { haversineKm, round1 } from "./geo.js";
 
@@ -12,40 +12,35 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-function getSettings() {
-  const rows = db.prepare("SELECT key,value FROM settings").all() as any[];
+async function getSettings() {
+  const result = await pool.query("SELECT key,value FROM settings");
+  const rows = result.rows as any[];
   return Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
 }
 
-function calcPrice(distanceKm: number, offeredPrice?: number | null) {
+async function calcPrice(distanceKm: number, offeredPrice?: number | null) {
   if (offeredPrice !== null && offeredPrice !== undefined) return Number(offeredPrice);
-  const s = getSettings();
+  const s = await getSettings();
   return s.base_price + Math.max(0, distanceKm - s.base_distance_km) * s.extra_km_price;
 }
 
-// Couriers must never see the confirmation code before delivery is confirmed.
 function sanitizeForCourier(rows: any[]) {
   return rows.map(({ confirmation_code, ...rest }) => rest);
 }
 
-function recordStatus(orderId: string, status: string) {
-  db.prepare("INSERT INTO order_status_history VALUES(?,?,?,?)").run(
-    crypto.randomUUID(),
-    orderId,
-    status,
-    new Date().toISOString()
+async function recordStatus(orderId: string, status: string) {
+  await pool.query(
+    "INSERT INTO order_status_history VALUES($1,$2,$3,$4)",
+    [crypto.randomUUID(), orderId, status, new Date().toISOString()]
   );
 }
 
-// Attaches assigned-courier contact + live location to an order, ONLY for
-// the customer who owns it, and ONLY once a courier is actually assigned
-// (never for still-pending orders — there is no assigned courier to show,
-// and we must never leak an unrelated courier's location).
-function attachCourierInfo(order: any) {
+async function attachCourierInfo(order: any) {
   if (!order.courier_id) return order;
-  const c: any = db
-    .prepare("SELECT name, phone, online, lat, lng, location_updated_at FROM users WHERE id=?")
-    .get(order.courier_id);
+  const c: any = (await pool.query(
+    "SELECT name, phone, online, lat, lng, location_updated_at FROM users WHERE id=$1",
+    [order.courier_id]
+  )).rows[0];
   if (!c) return order;
   return {
     ...order,
@@ -63,27 +58,17 @@ function attachCourierInfo(order: any) {
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 // ---------- Auth ----------
-app.post("/api/auth/register", (req, res) => {
+app.post("/api/auth/register", async (req, res) => {
   const { name, email, password, phone, role: r = "customer" } = req.body;
   if (!name || !email || !password || !phone || password.length < 6)
     return res.status(400).json({ error: "تحقق من البيانات" });
   if (!["customer", "courier"].includes(r)) return res.status(400).json({ error: "الدور غير صالح" });
   try {
     const id = crypto.randomUUID();
-    // Couriers must be approved by an admin before they can accept orders;
-    // customers (and admins, seeded separately) are approved by default.
     const approved = r === "customer" ? 1 : 0;
-    db.prepare(
-      "INSERT INTO users(id,name,email,phone,password_hash,role,created_at,online,approved) VALUES(?,?,?,?,?,?,?,0,?)"
-    ).run(
-      id,
-      name,
-      String(email).toLowerCase(),
-      phone,
-      bcrypt.hashSync(password, 12),
-      r,
-      new Date().toISOString(),
-      approved
+    await pool.query(
+      `INSERT INTO users(id,name,email,phone,password_hash,role,created_at,online,approved) VALUES($1,$2,$3,$4,$5,$6,$7,0,$8)`,
+      [id, name, String(email).toLowerCase(), phone, bcrypt.hashSync(password, 12), r, new Date().toISOString(), approved]
     );
     const user = { id, name, email: String(email).toLowerCase(), phone, role: r };
     res.json({ token: sign(user as any), user, approved: !!approved });
@@ -92,38 +77,35 @@ app.post("/api/auth/register", (req, res) => {
   }
 });
 
-app.post("/api/auth/login", (req, res) => {
-  const row: any = db
-    .prepare("SELECT * FROM users WHERE email=?")
-    .get(String(req.body.email || "").toLowerCase());
+app.post("/api/auth/login", async (req, res) => {
+  const row: any = (
+    await pool.query("SELECT * FROM users WHERE email=$1", [String(req.body.email || "").toLowerCase()])
+  ).rows[0];
   if (!row || !bcrypt.compareSync(req.body.password || "", row.password_hash))
     return res.status(401).json({ error: "البريد أو كلمة المرور غير صحيحة" });
   const user = { id: row.id, name: row.name, email: row.email, phone: row.phone, role: row.role };
   res.json({ token: sign(user as any), user, approved: !!row.approved });
 });
 
-app.get("/api/auth/me", auth, (req, res) => {
-  const row: any = db.prepare("SELECT approved, online FROM users WHERE id=?").get(req.user!.id);
+app.get("/api/auth/me", auth, async (req, res) => {
+  const row: any = (await pool.query("SELECT approved, online FROM users WHERE id=$1", [req.user!.id])).rows[0];
   res.json({ user: req.user, approved: !!row?.approved, online: !!row?.online });
 });
 
 // ---------- Courier presence & location ----------
-app.patch("/api/couriers/me/status", auth, role("courier"), (req, res) => {
+app.patch("/api/couriers/me/status", auth, role("courier"), async (req, res) => {
   const online = req.body.online ? 1 : 0;
-  db.prepare("UPDATE users SET online=? WHERE id=?").run(online, req.user!.id);
+  await pool.query("UPDATE users SET online=$1 WHERE id=$2", [online, req.user!.id]);
   res.json({ ok: true, online: !!online });
 });
 
-app.patch("/api/couriers/me/location", auth, role("courier"), (req, res) => {
+app.patch("/api/couriers/me/location", auth, role("courier"), async (req, res) => {
   const lat = Number(req.body.lat);
   const lng = Number(req.body.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return res.status(400).json({ error: "إحداثيات غير صالحة" });
-  db.prepare("UPDATE users SET lat=?,lng=?,location_updated_at=? WHERE id=?").run(
-    lat,
-    lng,
-    new Date().toISOString(),
-    req.user!.id
-  );
+  await pool.query("UPDATE users SET lat=$1,lng=$2,location_updated_at=$3 WHERE id=$4", [
+    lat, lng, new Date().toISOString(), req.user!.id
+  ]);
   res.json({ ok: true });
 });
 
@@ -131,13 +113,12 @@ app.patch("/api/couriers/me/location", auth, role("courier"), (req, res) => {
 // value of those orders, and the commission split (driven by the real
 // `commission_percent` setting, not a hardcoded number) between the
 // courier's share and the platform's share.
-app.get("/api/couriers/me/stats", auth, role("courier"), (req, res) => {
-  const row: any = db
-    .prepare(
-      "SELECT COUNT(*) c, COALESCE(SUM(final_price),0) r FROM orders WHERE courier_id=? AND status='completed'"
-    )
-    .get(req.user!.id);
-  const s = getSettings();
+app.get("/api/couriers/me/stats", auth, role("courier"), async (req, res) => {
+  const row: any = (await pool.query(
+    "SELECT COUNT(*) c, COALESCE(SUM(final_price),0) r FROM orders WHERE courier_id=$1 AND status='completed'",
+    [req.user!.id]
+  )).rows[0];
+  const s = await getSettings();
   const commissionPercent = s.commission_percent ?? 20;
   const totalRevenue = row.r;
   const appCommission = Math.round(totalRevenue * (commissionPercent / 100));
@@ -151,17 +132,15 @@ app.get("/api/couriers/me/stats", auth, role("courier"), (req, res) => {
 });
 
 // ---------- Orders ----------
-app.get("/api/orders", auth, (req, res) => {
+app.get("/api/orders", auth, async (req, res) => {
   const u = req.user!;
   let rows: any[];
   if (u.role === "customer") {
-    rows = db.prepare("SELECT * FROM orders WHERE customer_id=? ORDER BY created_at DESC").all(u.id);
-    rows = rows.map(attachCourierInfo);
+    rows = (await pool.query("SELECT * FROM orders WHERE customer_id=$1 ORDER BY created_at DESC", [u.id])).rows;
+    rows = await Promise.all(rows.map(attachCourierInfo));
   } else if (u.role === "courier") {
-    rows = db
-      .prepare("SELECT * FROM orders WHERE status='pending' OR courier_id=? ORDER BY created_at DESC")
-      .all(u.id);
-    const me: any = db.prepare("SELECT lat,lng FROM users WHERE id=?").get(u.id);
+    rows = (await pool.query("SELECT * FROM orders WHERE status='pending' OR courier_id=$1 ORDER BY created_at DESC", [u.id])).rows;
+    const me: any = (await pool.query("SELECT lat,lng FROM users WHERE id=$1", [u.id])).rows[0];
     if (me?.lat != null && me?.lng != null) {
       rows = rows.map((o) => {
         if (o.pickup_lat != null && o.pickup_lng != null) {
@@ -180,35 +159,36 @@ app.get("/api/orders", auth, (req, res) => {
     }
     rows = sanitizeForCourier(rows);
   } else {
-    rows = db.prepare("SELECT * FROM orders ORDER BY created_at DESC").all();
+    rows = (await pool.query("SELECT * FROM orders ORDER BY created_at DESC")).rows;
   }
   res.json({ orders: rows });
 });
 
-app.get("/api/orders/:id", auth, (req, res) => {
-  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+app.get("/api/orders/:id", auth, async (req, res) => {
+  const o: any = (await pool.query("SELECT * FROM orders WHERE id=$1", [req.params.id])).rows[0];
   if (!o) return res.status(404).json({ error: "الطلب غير موجود" });
   const u = req.user!;
   if (u.role === "customer") {
     if (o.customer_id !== u.id) return res.status(403).json({ error: "غير مصرح" });
-    return res.json({ order: attachCourierInfo(o) });
+    return res.json({ order: await attachCourierInfo(o) });
   }
   if (u.role === "courier") {
     if (o.status !== "pending" && o.courier_id !== u.id) return res.status(403).json({ error: "غير مصرح" });
     return res.json({ order: sanitizeForCourier([o])[0] });
   }
-  res.json({ order: attachCourierInfo(o) });
+  res.json({ order: await attachCourierInfo(o) });
 });
 
-app.get("/api/orders/:id/timeline", auth, (req, res) => {
-  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+app.get("/api/orders/:id/timeline", auth, async (req, res) => {
+  const o: any = (await pool.query("SELECT * FROM orders WHERE id=$1", [req.params.id])).rows[0];
   if (!o) return res.status(404).json({ error: "الطلب غير موجود" });
   const u = req.user!;
   const allowed = u.role === "admin" || o.customer_id === u.id || o.courier_id === u.id;
   if (!allowed) return res.status(403).json({ error: "غير مصرح" });
-  const history = db
-    .prepare("SELECT status, created_at FROM order_status_history WHERE order_id=? ORDER BY created_at ASC")
-    .all(req.params.id);
+  const history = (await pool.query(
+    "SELECT status, created_at FROM order_status_history WHERE order_id=$1 ORDER BY created_at ASC",
+    [req.params.id]
+  )).rows;
   res.json({ history });
 });
 
@@ -216,19 +196,19 @@ app.get("/api/orders/:id/timeline", auth, (req, res) => {
 // MANY online/approved couriers are near the pickup point, but never who
 // they are or where exactly — matching "no location of an unrelated
 // courier is ever shown to the customer".
-app.get("/api/orders/:id/nearby-couriers-count", auth, role("customer"), (req, res) => {
-  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+app.get("/api/orders/:id/nearby-couriers-count", auth, role("customer"), async (req, res) => {
+  const o: any = (await pool.query("SELECT * FROM orders WHERE id=$1", [req.params.id])).rows[0];
   if (!o || o.customer_id !== req.user!.id) return res.status(404).json({ error: "الطلب غير موجود" });
   if (o.pickup_lat == null || o.pickup_lng == null) return res.json({ count: null });
-  const s = getSettings();
-  const couriers: any[] = db
-    .prepare("SELECT lat,lng FROM users WHERE role='courier' AND online=1 AND approved=1 AND lat IS NOT NULL")
-    .all();
+  const s = await getSettings();
+  const couriers: any[] = (await pool.query(
+    "SELECT lat,lng FROM users WHERE role='courier' AND online=1 AND approved=1 AND lat IS NOT NULL"
+  )).rows;
   const count = couriers.filter((c) => haversineKm(o.pickup_lat, o.pickup_lng, c.lat, c.lng) <= s.search_radius_km).length;
   res.json({ count });
 });
 
-app.post("/api/orders", auth, role("customer"), (req, res) => {
+app.post("/api/orders", auth, role("customer"), async (req, res) => {
   const {
     pickup_address,
     delivery_address,
@@ -256,57 +236,40 @@ app.post("/api/orders", auth, role("customer"), (req, res) => {
     return res.status(400).json({ error: "حدّد الموقعين على الخريطة أو أدخل المسافة" });
   }
 
-  const price = calcPrice(d, offered_price);
+  const price = await calcPrice(d, offered_price);
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const code = String(Math.floor(100000 + Math.random() * 900000));
-  db.prepare(
+  await pool.query(
     `INSERT INTO orders(
       id,customer_id,pickup_address,delivery_address,pickup_lat,pickup_lng,delivery_lat,delivery_lng,
       distance_km,package_description,recipient_phone,notes,offered_price,final_price,status,
       confirmation_code,created_at,updated_at
-    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).run(
-    id,
-    req.user!.id,
-    pickup_address,
-    delivery_address,
-    hasCoords ? Number(pickup_lat) : null,
-    hasCoords ? Number(pickup_lng) : null,
-    hasCoords ? Number(delivery_lat) : null,
-    hasCoords ? Number(delivery_lng) : null,
-    d,
-    package_description || null,
-    recipient_phone || null,
-    notes || null,
-    offered_price ?? null,
-    price,
-    "pending",
-    code,
-    now,
-    now
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+    [id, req.user!.id, pickup_address, delivery_address, hasCoords ? Number(pickup_lat) : null, hasCoords ? Number(pickup_lng) : null, hasCoords ? Number(delivery_lat) : null, hasCoords ? Number(delivery_lng) : null, d, package_description || null, recipient_phone || null, notes || null, offered_price ?? null, price, "pending", code, now, now]
   );
-  recordStatus(id, "pending");
+  await recordStatus(id, "pending");
   res.json({ ok: true, id, final_price: price, distance_km: d, confirmation_code: code });
 });
 
-app.post("/api/orders/:id/accept", auth, role("courier"), (req, res) => {
-  const me: any = db.prepare("SELECT approved FROM users WHERE id=?").get(req.user!.id);
+app.post("/api/orders/:id/accept", auth, role("courier"), async (req, res) => {
+  const me: any = (await pool.query("SELECT approved FROM users WHERE id=$1", [req.user!.id])).rows[0];
   if (!me?.approved) return res.status(403).json({ error: "حسابك بانتظار اعتماد الإدارة قبل قبول الطلبات" });
-  const r = db
-    .prepare("UPDATE orders SET courier_id=?,status='accepted',updated_at=? WHERE id=? AND status='pending'")
-    .run(req.user!.id, new Date().toISOString(), req.params.id);
-  if (!r.changes) return res.status(409).json({ error: "الطلب غير متاح" });
-  recordStatus(req.params.id, "accepted");
+  const r = await pool.query(
+    "UPDATE orders SET courier_id=$1,status='accepted',updated_at=$2 WHERE id=$3 AND status='pending'",
+    [req.user!.id, new Date().toISOString(), req.params.id]
+  );
+  if (!r.rowCount) return res.status(409).json({ error: "الطلب غير متاح" });
+  await recordStatus(req.params.id as string, "accepted");
   res.json({ ok: true });
 });
 
-app.post("/api/orders/:id/pickup", auth, role("courier"), (req, res) => {
-  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+app.post("/api/orders/:id/pickup", auth, role("courier"), async (req, res) => {
+  const o: any = (await pool.query("SELECT * FROM orders WHERE id=$1", [req.params.id])).rows[0];
   if (!o || o.courier_id !== req.user!.id) return res.status(404).json({ error: "الطلب غير موجود" });
   if (o.status !== "accepted") return res.status(409).json({ error: "حالة الطلب غير صالحة" });
-  db.prepare("UPDATE orders SET status='picked_up',updated_at=? WHERE id=?").run(new Date().toISOString(), req.params.id);
-  recordStatus(req.params.id, "picked_up");
+  await pool.query("UPDATE orders SET status='picked_up',updated_at=$1 WHERE id=$2", [new Date().toISOString(), req.params.id]);
+  await recordStatus(req.params.id as string, "picked_up");
   res.json({ ok: true });
 });
 
@@ -315,159 +278,126 @@ app.post("/api/orders/:id/pickup", auth, role("courier"), (req, res) => {
 // available for another courier, not be cancelled outright (the customer
 // still wants their delivery). Only allowed from 'accepted' — once the
 // courier has picked the package up, backing out is no longer offered.
-app.post("/api/orders/:id/unassign", auth, role("courier"), (req, res) => {
-  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+app.post("/api/orders/:id/unassign", auth, role("courier"), async (req, res) => {
+  const o: any = (await pool.query("SELECT * FROM orders WHERE id=$1", [req.params.id])).rows[0];
   if (!o || o.courier_id !== req.user!.id) return res.status(404).json({ error: "الطلب غير موجود" });
   if (o.status !== "accepted") return res.status(409).json({ error: "لا يمكن التراجع عن هذا الطلب الآن" });
-  db.prepare("UPDATE orders SET courier_id=NULL,status='pending',updated_at=? WHERE id=?").run(
-    new Date().toISOString(),
-    req.params.id
-  );
-  recordStatus(req.params.id, "pending");
+  await pool.query("UPDATE orders SET courier_id=NULL,status='pending',updated_at=$1 WHERE id=$2", [new Date().toISOString(), req.params.id]);
+  await recordStatus(req.params.id as string, "pending");
   res.json({ ok: true });
 });
 
-app.post("/api/orders/:id/cancel", auth, (req, res) => {
-  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+app.post("/api/orders/:id/cancel", auth, async (req, res) => {
+  const o: any = (await pool.query("SELECT * FROM orders WHERE id=$1", [req.params.id])).rows[0];
   if (!o) return res.status(404).json({ error: "الطلب غير موجود" });
   const u = req.user!;
   const allowed = u.role === "admin" || (u.role === "customer" && o.customer_id === u.id);
   if (!allowed) return res.status(403).json({ error: "غير مصرح" });
   if (!["pending", "accepted"].includes(o.status)) return res.status(409).json({ error: "لا يمكن إلغاء هذا الطلب" });
-  db.prepare("UPDATE orders SET status='cancelled',updated_at=? WHERE id=?").run(new Date().toISOString(), req.params.id);
-  recordStatus(req.params.id, "cancelled");
+  await pool.query("UPDATE orders SET status='cancelled',updated_at=$1 WHERE id=$2", [new Date().toISOString(), req.params.id]);
+  await recordStatus(req.params.id as string, "cancelled");
   res.json({ ok: true });
 });
 
 // ✅ تم تعديل هذا المسار: تم إلغاء فحص الرمز ليتأكد التوصيل مباشرة
-app.post("/api/orders/:id/deliver", auth, role("courier"), (req, res) => {
-  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+app.post("/api/orders/:id/deliver", auth, role("courier"), async (req, res) => {
+  const o: any = (await pool.query("SELECT * FROM orders WHERE id=$1", [req.params.id])).rows[0];
   if (!o || o.courier_id !== req.user!.id) return res.status(404).json({ error: "الطلب غير موجود" });
   if (o.status !== "picked_up") return res.status(409).json({ error: "حالة الطلب غير صالحة" });
-
-  db.prepare("UPDATE orders SET status='delivered',updated_at=? WHERE id=?").run(new Date().toISOString(), req.params.id);
-  recordStatus(req.params.id, "delivered");
+  await pool.query("UPDATE orders SET status='delivered',updated_at=$1 WHERE id=$2", [new Date().toISOString(), req.params.id]);
+  await recordStatus(req.params.id as string, "delivered");
   res.json({ ok: true });
 });
 
 // ---------- Ratings ----------
-app.post("/api/orders/:id/rate", auth, role("customer"), (req, res) => {
-  const o: any = db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);
+app.post("/api/orders/:id/rate", auth, role("customer"), async (req, res) => {
+  const o: any = (await pool.query("SELECT * FROM orders WHERE id=$1", [req.params.id])).rows[0];
   if (!o || o.customer_id !== req.user!.id) return res.status(404).json({ error: "الطلب غير موجود" });
   if (o.status !== "delivered") return res.status(409).json({ error: "لا يمكن التقييم الآن" });
   const stars = Number(req.body.stars);
   if (!stars || stars < 1 || stars > 5) return res.status(400).json({ error: "التقييم غير صالح" });
-  const existing = db.prepare("SELECT id FROM ratings WHERE order_id=?").get(o.id);
+  const existing = (await pool.query("SELECT id FROM ratings WHERE order_id=$1", [o.id])).rows[0];
   if (existing) return res.status(409).json({ error: "تم التقييم مسبقًا" });
-  db.prepare("INSERT INTO ratings VALUES(?,?,?,?,?,?,?)").run(
-    crypto.randomUUID(),
-    o.id,
-    o.customer_id,
-    o.courier_id,
-    stars,
-    req.body.comment || null,
-    new Date().toISOString()
-  );
-  db.prepare("UPDATE orders SET status='completed',updated_at=? WHERE id=?").run(new Date().toISOString(), o.id);
-  recordStatus(o.id, "completed");
+  await pool.query("INSERT INTO ratings VALUES($1,$2,$3,$4,$5,$6,$7)", [
+    crypto.randomUUID(), o.id, o.customer_id, o.courier_id, stars, req.body.comment || null, new Date().toISOString()
+  ]);
+  await pool.query("UPDATE orders SET status='completed',updated_at=$1 WHERE id=$2", [new Date().toISOString(), o.id]);
+  await recordStatus(o.id, "completed");
   res.json({ ok: true });
 });
 
-app.get("/api/couriers/:id/ratings", auth, (req, res) => {
-  const rows: any[] = db
-    .prepare("SELECT stars,comment,created_at FROM ratings WHERE courier_id=? ORDER BY created_at DESC")
-    .all(req.params.id);
+app.get("/api/couriers/:id/ratings", auth, async (req, res) => {
+  const rows: any[] = (await pool.query("SELECT stars,comment,created_at FROM ratings WHERE courier_id=$1 ORDER BY created_at DESC", [req.params.id])).rows;
   const avg = rows.length ? rows.reduce((s, x) => s + x.stars, 0) / rows.length : 0;
   res.json({ ratings: rows, average: Math.round(avg * 10) / 10, count: rows.length });
 });
 
 // ---------- Complaints ----------
-app.post("/api/complaints", auth, (req, res) => {
+app.post("/api/complaints", auth, async (req, res) => {
   const { order_id, message } = req.body;
   if (!message) return res.status(400).json({ error: "الرسالة مطلوبة" });
   const now = new Date().toISOString();
-  db.prepare("INSERT INTO complaints VALUES(?,?,?,?,?,?,?,?)").run(
-    crypto.randomUUID(),
-    order_id || null,
-    req.user!.id,
-    message,
-    "pending",
-    null,
-    now,
-    now
-  );
+  await pool.query("INSERT INTO complaints VALUES($1,$2,$3,$4,$5,$6,$7,$8)", [
+    crypto.randomUUID(), order_id || null, req.user!.id, message, "pending", null, now, now
+  ]);
   res.json({ ok: true });
 });
 
-app.get("/api/complaints", auth, (req, res) => {
+app.get("/api/complaints", auth, async (req, res) => {
   const u = req.user!;
-  const rows =
-    u.role === "admin"
-      ? db.prepare("SELECT * FROM complaints ORDER BY created_at DESC").all()
-      : db.prepare("SELECT * FROM complaints WHERE user_id=? ORDER BY created_at DESC").all(u.id);
+  const rows = u.role === "admin"
+    ? (await pool.query("SELECT * FROM complaints ORDER BY created_at DESC")).rows
+    : (await pool.query("SELECT * FROM complaints WHERE user_id=$1 ORDER BY created_at DESC", [u.id])).rows;
   res.json({ complaints: rows });
 });
 
-app.patch("/api/complaints/:id", auth, role("admin"), (req, res) => {
+app.patch("/api/complaints/:id", auth, role("admin"), async (req, res) => {
   const { status, response } = req.body;
-  db.prepare("UPDATE complaints SET status=?,response=?,updated_at=? WHERE id=?").run(
-    status || "resolved",
-    response || null,
-    new Date().toISOString(),
-    req.params.id
-  );
+  await pool.query("UPDATE complaints SET status=$1,response=$2,updated_at=$3 WHERE id=$4", [
+    status || "resolved", response || null, new Date().toISOString(), req.params.id
+  ]);
   res.json({ ok: true });
 });
 
 // ---------- Admin ----------
-app.get("/api/admin/users", auth, role("admin"), (_req, res) => {
-  const rows = db
-    .prepare("SELECT id,name,email,phone,role,created_at,online,approved FROM users ORDER BY created_at DESC")
-    .all();
+app.get("/api/admin/users", auth, role("admin"), async (_req, res) => {
+  const rows = (await pool.query("SELECT id,name,email,phone,role,created_at,online,approved FROM users ORDER BY created_at DESC")).rows;
   res.json({ users: rows });
 });
 
-app.get("/api/admin/couriers", auth, role("admin"), (_req, res) => {
-  const rows = db
-    .prepare(
-      "SELECT id,name,email,phone,created_at,online,approved,lat,lng,location_updated_at FROM users WHERE role='courier' ORDER BY created_at DESC"
-    )
-    .all();
+app.get("/api/admin/couriers", auth, role("admin"), async (_req, res) => {
+  const rows = (await pool.query(
+    "SELECT id,name,email,phone,created_at,online,approved,lat,lng,location_updated_at FROM users WHERE role='courier' ORDER BY created_at DESC"
+  )).rows;
   res.json({ couriers: rows });
 });
 
-app.patch("/api/admin/couriers/:id/approve", auth, role("admin"), (req, res) => {
+app.patch("/api/admin/couriers/:id/approve", auth, role("admin"), async (req, res) => {
   const approved = req.body.approved ? 1 : 0;
-  const r = db.prepare("UPDATE users SET approved=? WHERE id=? AND role='courier'").run(approved, req.params.id);
-  if (!r.changes) return res.status(404).json({ error: "المندوب غير موجود" });
+  const r = await pool.query("UPDATE users SET approved=$1 WHERE id=$2 AND role='courier'", [approved, req.params.id]);
+  if (!r.rowCount) return res.status(404).json({ error: "المندوب غير موجود" });
   res.json({ ok: true, approved: !!approved });
 });
 
-app.get("/api/admin/settings", auth, role("admin"), (_req, res) => {
-  res.json({ settings: getSettings() });
+app.get("/api/admin/settings", auth, role("admin"), async (_req, res) => {
+  res.json({ settings: await getSettings() });
 });
 
-app.patch("/api/admin/settings", auth, role("admin"), (req, res) => {
+app.patch("/api/admin/settings", auth, role("admin"), async (req, res) => {
   const updates = req.body as Record<string, number>;
-  const stmt = db.prepare(
-    "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-  );
-  for (const [k, v] of Object.entries(updates)) stmt.run(k, String(v));
-  res.json({ ok: true, settings: getSettings() });
+  const stmt = "INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
+  for (const [k, v] of Object.entries(updates)) await pool.query(stmt, [k, String(v)]);
+  res.json({ ok: true, settings: await getSettings() });
 });
 
-app.get("/api/admin/stats", auth, role("admin"), (_req, res) => {
-  const ordersByStatus = db.prepare("SELECT status, COUNT(*) c FROM orders GROUP BY status").all();
-  const usersByRole = db.prepare("SELECT role, COUNT(*) c FROM users GROUP BY role").all();
-  const revenue: any = db.prepare("SELECT COALESCE(SUM(final_price),0) r FROM orders WHERE status='completed'").get();
-  const activeOrders: any = db
-    .prepare("SELECT COUNT(*) c FROM orders WHERE status IN ('pending','accepted','picked_up')")
-    .get();
-  const couriersOnline: any = db
-    .prepare("SELECT COUNT(*) c FROM users WHERE role='courier' AND online=1 AND approved=1")
-    .get();
-  const couriersApproved: any = db.prepare("SELECT COUNT(*) c FROM users WHERE role='courier' AND approved=1").get();
-  const couriersPending: any = db.prepare("SELECT COUNT(*) c FROM users WHERE role='courier' AND approved=0").get();
+app.get("/api/admin/stats", auth, role("admin"), async (_req, res) => {
+  const ordersByStatus = (await pool.query("SELECT status, COUNT(*) c FROM orders GROUP BY status")).rows;
+  const usersByRole = (await pool.query("SELECT role, COUNT(*) c FROM users GROUP BY role")).rows;
+  const revenue: any = (await pool.query("SELECT COALESCE(SUM(final_price),0) r FROM orders WHERE status='completed'")).rows[0];
+  const activeOrders: any = (await pool.query("SELECT COUNT(*) c FROM orders WHERE status IN ('pending','accepted','picked_up')")).rows[0];
+  const couriersOnline: any = (await pool.query("SELECT COUNT(*) c FROM users WHERE role='courier' AND online=1 AND approved=1")).rows[0];
+  const couriersApproved: any = (await pool.query("SELECT COUNT(*) c FROM users WHERE role='courier' AND approved=1")).rows[0];
+  const couriersPending: any = (await pool.query("SELECT COUNT(*) c FROM users WHERE role='courier' AND approved=0")).rows[0];
   res.json({
     ordersByStatus,
     usersByRole,
