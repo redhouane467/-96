@@ -1943,7 +1943,7 @@ app.use(
 );
 
 app.get(
-  "/*splat"
+  "/*splat",
   (_req, res) => {
     res.sendFile(
       path.join(
