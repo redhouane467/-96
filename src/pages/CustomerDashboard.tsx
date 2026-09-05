@@ -35,9 +35,7 @@ export default function CustomerDashboard({
 
   async function loadOrders() {
     try {
-      const data = await api<{ orders: Order[] }>(
-        "/orders"
-      );
+      const data = await api<{ orders: Order[] }>("/orders");
 
       setOrders(data.orders || []);
       setError("");
@@ -246,7 +244,8 @@ export default function CustomerDashboard({
                   )}
                 </div>
 
-                {o.status === "delivered" && (
+                {(o.status === "completed" ||
+                  o.status === "delivered") && (
                   <RateBox
                     onRate={(s) =>
                       rate(o.id, s)
@@ -301,9 +300,6 @@ function NewOrderForm({
     useState("");
 
   const [orderDescription, setOrderDescription] =
-    useState("");
-
-  const [recipientPhone, setRecipientPhone] =
     useState("");
 
   const [notes, setNotes] = useState("");
@@ -524,19 +520,17 @@ function NewOrderForm({
           delivery_lng:
             delivery.lng,
 
-          /*
-           * مهم:
-           * السيرفر يحتاج هذه القيمة لحساب
-           * السعر والتحقق من صحة الطلب.
-           */
           distance_km:
             distanceKm,
 
           package_description:
             orderDescription.trim(),
 
-          recipient_phone:
-            recipientPhone.trim() || null,
+          /*
+           * لا نرسل recipient_phone.
+           * السيرفر يأخذ رقم هاتف العميل
+           * المسجل تلقائيًا.
+           */
 
           notes:
             notes.trim() || null,
@@ -701,23 +695,14 @@ function NewOrderForm({
           }
         />
 
-        <input
-          className="w-full border rounded-xl p-3"
-          placeholder="هاتف المستلم (اختياري)"
-          value={recipientPhone}
-          onChange={(e) =>
-            setRecipientPhone(
-              e.target.value
-            )
-          }
-        />
-
         <textarea
           className="w-full border rounded-xl p-3 min-h-[80px]"
           placeholder="ملاحظات إضافية (اختياري)"
           value={notes}
           onChange={(e) =>
-            setNotes(e.target.value)
+            setNotes(
+              e.target.value
+            )
           }
         />
 
