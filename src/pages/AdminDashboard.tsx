@@ -7,7 +7,13 @@ import Header from "../components/Header";
 import OrderCard from "../components/OrderCard";
 import { LoadingState, EmptyState, ErrorState } from "../components/States";
 
-type Tab = "stats" | "couriers" | "orders" | "users" | "settings" | "complaints";
+type Tab =
+  | "stats"
+  | "couriers"
+  | "orders"
+  | "users"
+  | "settings"
+  | "complaints";
 
 type Stats = {
   ordersByStatus: { status: string; c: number }[];
@@ -28,6 +34,7 @@ type CourierRow = {
   approved: boolean | number;
   location_updated_at: string | null;
   has_id_card?: boolean;
+  courier_debt?: number;
 };
 
 export default function AdminDashboard({
@@ -42,12 +49,15 @@ export default function AdminDashboard({
   const [users, setUsers] = useState<any[]>([]);
   const [couriers, setCouriers] = useState<CourierRow[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [settings, setSettings] = useState<Record<string, number> | null>(null);
+  const [settings, setSettings] =
+    useState<Record<string, number> | null>(null);
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [idCardUrl, setIdCardUrl] = useState<string | null>(null);
   const [idCardLoading, setIdCardLoading] = useState(false);
+  const [debtLoading, setDebtLoading] = useState<string | null>(null);
+
   const toast = useToast();
 
   useEffect(() => {
@@ -119,7 +129,10 @@ export default function AdminDashboard({
       setSettings(d.settings);
       toast("تم حفظ الإعدادات", "success");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "خطأ", "error");
+      toast(
+        err instanceof Error ? err.message : "خطأ",
+        "error"
+      );
     }
   }
 
@@ -138,31 +151,97 @@ export default function AdminDashboard({
         }),
       });
 
-      const d = await api<{ complaints: Complaint[] }>("/complaints");
+      const d = await api<{ complaints: Complaint[] }>(
+        "/complaints"
+      );
+
       setComplaints(d.complaints);
 
       toast("تم إرسال الرد", "success");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "خطأ", "error");
+      toast(
+        err instanceof Error ? err.message : "خطأ",
+        "error"
+      );
     }
   }
 
-  async function setApproval(id: string, approved: boolean) {
+  async function setApproval(
+    id: string,
+    approved: boolean
+  ) {
     try {
       await api(`/admin/couriers/${id}/approve`, {
         method: "PATCH",
         body: JSON.stringify({ approved }),
       });
 
-      const d = await api<{ couriers: CourierRow[] }>("/admin/couriers");
+      const d = await api<{ couriers: CourierRow[] }>(
+        "/admin/couriers"
+      );
+
       setCouriers(d.couriers);
 
       toast(
-        approved ? "تم اعتماد المندوب" : "تم إلغاء الاعتماد",
+        approved
+          ? "تم اعتماد المندوب"
+          : "تم إلغاء الاعتماد",
         "success"
       );
     } catch (err) {
-      toast(err instanceof Error ? err.message : "خطأ", "error");
+      toast(
+        err instanceof Error ? err.message : "خطأ",
+        "error"
+      );
+    }
+  }
+
+  async function markDebtPaid(id: string) {
+    if (debtLoading) return;
+
+    const courier = couriers.find((c) => c.id === id);
+    const debt = Number(courier?.courier_debt || 0);
+
+    if (debt <= 0) {
+      toast("لا يوجد دين مستحق على هذا المندوب", "success");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `هل استلمت كامل الدين المستحق من المندوب؟\n\nالمبلغ: ${debt} دج\n\nسيتم تصفير الدين بالكامل.`
+    );
+
+    if (!confirmed) return;
+
+    setDebtLoading(id);
+
+    try {
+      const d = await api<{
+        ok: boolean;
+        courier_debt: number;
+      }>(`/admin/couriers/${id}/debt/paid`, {
+        method: "PATCH",
+      });
+
+      setCouriers((current) =>
+        current.map((c) =>
+          c.id === id
+            ? {
+                ...c,
+                courier_debt: d.courier_debt,
+              }
+            : c
+        )
+      );
+
+      toast("تم تسجيل استلام الدين وتصفيره", "success");
+    } catch (err) {
+      toast(
+        err instanceof Error ? err.message : "تعذر تحديث الدين",
+        "error"
+      );
+    } finally {
+      setDebtLoading(null);
     }
   }
 
@@ -172,17 +251,23 @@ export default function AdminDashboard({
     try {
       const token = localStorage.getItem("wassli_token");
 
-      const response = await fetch(`/api/admin/couriers/${id}/id-card`, {
-        headers: {
-          Authorization: token ? `Bearer ${token}` : "",
-        },
-      });
+      const response = await fetch(
+        `/api/admin/couriers/${id}/id-card`,
+        {
+          headers: {
+            Authorization: token
+              ? `Bearer ${token}`
+              : "",
+          },
+        }
+      );
 
       if (!response.ok) {
         let message = "تعذر تحميل بطاقة التعريف";
 
         try {
           const data = await response.json();
+
           if (data?.error) {
             message = data.error;
           }
@@ -200,11 +285,14 @@ export default function AdminDashboard({
         if (oldUrl) {
           URL.revokeObjectURL(oldUrl);
         }
+
         return url;
       });
     } catch (err) {
       toast(
-        err instanceof Error ? err.message : "تعذر تحميل بطاقة التعريف",
+        err instanceof Error
+          ? err.message
+          : "تعذر تحميل بطاقة التعريف",
         "error"
       );
     } finally {
@@ -256,50 +344,55 @@ export default function AdminDashboard({
       <section className="max-w-5xl mx-auto p-4 space-y-4">
         {loading && <LoadingState />}
 
-        {!loading && error && <ErrorState message={error} />}
+        {!loading && error && (
+          <ErrorState message={error} />
+        )}
 
-        {!loading && !error && tab === "stats" && stats && (
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            <StatCard
-              label="طلبات نشطة"
-              value={stats.activeOrders}
-            />
-
-            <StatCard
-              label="مندوبون متصلون"
-              value={stats.couriersOnline}
-            />
-
-            <StatCard
-              label="مندوبون معتمدون"
-              value={stats.couriersApproved}
-            />
-
-            <StatCard
-              label="بانتظار الاعتماد"
-              value={stats.couriersPending}
-              accent="amber"
-            />
-
-            {stats.ordersByStatus.map((s) => (
+        {!loading &&
+          !error &&
+          tab === "stats" &&
+          stats && (
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <StatCard
-                key={s.status}
-                label={s.status}
-                value={s.c}
+                label="طلبات نشطة"
+                value={stats.activeOrders}
               />
-            ))}
 
-            <div className="bg-white rounded-2xl p-4 shadow-sm col-span-2">
-              <div className="text-slate-500 text-sm">
-                إجمالي إيرادات الطلبات المكتملة
-              </div>
+              <StatCard
+                label="مندوبون متصلون"
+                value={stats.couriersOnline}
+              />
 
-              <div className="text-2xl font-black text-green-700">
-                {stats.revenue} دج
+              <StatCard
+                label="مندوبون معتمدون"
+                value={stats.couriersApproved}
+              />
+
+              <StatCard
+                label="بانتظار الاعتماد"
+                value={stats.couriersPending}
+                accent="amber"
+              />
+
+              {stats.ordersByStatus.map((s) => (
+                <StatCard
+                  key={s.status}
+                  label={s.status}
+                  value={s.c}
+                />
+              ))}
+
+              <div className="bg-white rounded-2xl p-4 shadow-sm col-span-2">
+                <div className="text-slate-500 text-sm">
+                  إجمالي إيرادات الطلبات المكتملة
+                </div>
+
+                <div className="text-2xl font-black text-green-700">
+                  {stats.revenue} دج
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
         {!loading &&
           !error &&
@@ -311,92 +404,151 @@ export default function AdminDashboard({
             />
           ) : (
             <div className="space-y-3">
-              {couriers.map((c) => (
-                <div
-                  key={c.id}
-                  className="bg-white rounded-2xl p-4 shadow-sm space-y-3"
-                >
-                  <div className="flex justify-between items-start gap-3">
-                    <div className="min-w-0">
-                      <div className="font-bold text-slate-900">
-                        {c.name}
+              {couriers.map((c) => {
+                const debt = Number(c.courier_debt || 0);
+
+                return (
+                  <div
+                    key={c.id}
+                    className="bg-white rounded-2xl p-4 shadow-sm space-y-3"
+                  >
+                    <div className="flex justify-between items-start gap-3">
+                      <div className="min-w-0">
+                        <div className="font-bold text-slate-900">
+                          {c.name}
+                        </div>
+
+                        <div
+                          className="text-sm text-slate-500 mt-1"
+                          dir="ltr"
+                        >
+                          {c.phone}
+                        </div>
                       </div>
 
-                      <div
-                        className="text-sm text-slate-500 mt-1"
-                        dir="ltr"
-                      >
-                        {c.phone}
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <span
+                          className={`text-xs rounded-full px-2 py-1 font-bold ${
+                            c.approved
+                              ? "bg-green-100 text-green-700"
+                              : "bg-amber-100 text-amber-800"
+                          }`}
+                        >
+                          {c.approved
+                            ? "معتمد"
+                            : "بانتظار الاعتماد"}
+                        </span>
+
+                        <span
+                          className={`text-xs rounded-full px-2 py-1 ${
+                            c.online
+                              ? "bg-blue-100 text-blue-700"
+                              : "bg-slate-100 text-slate-500"
+                          }`}
+                        >
+                          {c.online
+                            ? "متصل"
+                            : "غير متصل"}
+                        </span>
                       </div>
                     </div>
 
-                    <div className="flex flex-col items-end gap-1 shrink-0">
-                      <span
-                        className={`text-xs rounded-full px-2 py-1 font-bold ${
+                    <div
+                      className={`rounded-xl p-3 ${
+                        debt > 0
+                          ? "bg-red-50"
+                          : "bg-green-50"
+                      }`}
+                    >
+                      <div className="flex justify-between items-center gap-3">
+                        <div>
+                          <div
+                            className={`text-sm font-bold ${
+                              debt > 0
+                                ? "text-red-700"
+                                : "text-green-700"
+                            }`}
+                          >
+                            الديون الواجبة للتطبيق
+                          </div>
+
+                          <div
+                            className={`text-2xl font-black mt-1 ${
+                              debt > 0
+                                ? "text-red-700"
+                                : "text-green-700"
+                            }`}
+                          >
+                            {debt} دج
+                          </div>
+                        </div>
+
+                        {debt > 0 && (
+                          <button
+                            onClick={() =>
+                              markDebtPaid(c.id)
+                            }
+                            disabled={
+                              debtLoading === c.id
+                            }
+                            className="bg-green-600 text-white rounded-xl px-4 py-3 font-bold text-sm disabled:opacity-50"
+                          >
+                            {debtLoading === c.id
+                              ? "جاري التسجيل..."
+                              : "تم الاستلام"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div
+                      className={`rounded-xl p-3 text-sm ${
+                        c.has_id_card
+                          ? "bg-green-50 text-green-700"
+                          : "bg-red-50 text-red-700"
+                      }`}
+                    >
+                      {c.has_id_card
+                        ? "✅ بطاقة التعريف مرفوعة"
+                        : "❌ بطاقة التعريف غير موجودة"}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {c.has_id_card && (
+                        <button
+                          onClick={() =>
+                            viewIdCard(c.id)
+                          }
+                          disabled={idCardLoading}
+                          className="w-full rounded-xl py-2 font-bold text-sm bg-blue-50 text-blue-700 disabled:opacity-50"
+                        >
+                          {idCardLoading
+                            ? "جاري التحميل..."
+                            : "👁 عرض بطاقة التعريف"}
+                        </button>
+                      )}
+
+                      <button
+                        onClick={() =>
+                          setApproval(
+                            c.id,
+                            !Boolean(c.approved)
+                          )
+                        }
+                        className={`w-full rounded-xl py-2 font-bold text-sm ${
                           c.approved
-                            ? "bg-green-100 text-green-700"
-                            : "bg-amber-100 text-amber-800"
+                            ? "bg-red-50 text-red-700"
+                            : "bg-green-600 text-white"
                         }`}
                       >
                         {c.approved
-                          ? "معتمد"
-                          : "بانتظار الاعتماد"}
-                      </span>
-
-                      <span
-                        className={`text-xs rounded-full px-2 py-1 ${
-                          c.online
-                            ? "bg-blue-100 text-blue-700"
-                            : "bg-slate-100 text-slate-500"
-                        }`}
-                      >
-                        {c.online ? "متصل" : "غير متصل"}
-                      </span>
+                          ? "إلغاء الاعتماد"
+                          : "اعتماد المندوب"}
+                      </button>
                     </div>
                   </div>
-
-                  <div
-                    className={`rounded-xl p-3 text-sm ${
-                      c.has_id_card
-                        ? "bg-green-50 text-green-700"
-                        : "bg-red-50 text-red-700"
-                    }`}
-                  >
-                    {c.has_id_card
-                      ? "✅ بطاقة التعريف مرفوعة"
-                      : "❌ بطاقة التعريف غير موجودة"}
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {c.has_id_card && (
-                      <button
-                        onClick={() => viewIdCard(c.id)}
-                        disabled={idCardLoading}
-                        className="w-full rounded-xl py-2 font-bold text-sm bg-blue-50 text-blue-700 disabled:opacity-50"
-                      >
-                        {idCardLoading
-                          ? "جاري التحميل..."
-                          : "👁 عرض بطاقة التعريف"}
-                      </button>
-                    )}
-
-                    <button
-                      onClick={() =>
-                        setApproval(c.id, !Boolean(c.approved))
-                      }
-                      className={`w-full rounded-xl py-2 font-bold text-sm ${
-                        c.approved
-                          ? "bg-red-50 text-red-700"
-                          : "bg-green-600 text-white"
-                      }`}
-                    >
-                      {c.approved
-                        ? "إلغاء الاعتماد"
-                        : "اعتماد المندوب"}
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ))}
 
@@ -483,7 +635,9 @@ export default function AdminDashboard({
                     onChange={(e) =>
                       setSettings({
                         ...settings,
-                        [k]: Number(e.target.value),
+                        [k]: Number(
+                          e.target.value
+                        ),
                       })
                     }
                   />
@@ -509,7 +663,9 @@ export default function AdminDashboard({
               <ComplaintRow
                 key={c.id}
                 complaint={c}
-                onRespond={(r) => respond(c.id, r)}
+                onRespond={(r) =>
+                  respond(c.id, r)
+                }
               />
             ))
           ))}
