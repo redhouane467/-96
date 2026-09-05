@@ -42,6 +42,7 @@ async function init() {
       notes TEXT,
       offered_price REAL,
       final_price REAL,
+      commission_amount REAL NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'pending',
       confirmation_code TEXT,
       created_at TEXT NOT NULL,
@@ -197,6 +198,12 @@ async function init() {
     "TEXT"
   );
 
+  await addColumnIfMissing(
+    "orders",
+    "commission_amount",
+    "REAL NOT NULL DEFAULT 0"
+  );
+
   await pool.query(`
     INSERT INTO settings(key, value)
     VALUES('base_price', '150')
@@ -235,10 +242,8 @@ async function init() {
   `);
 
   /*
-   * تهيئة ديون المندوبين مرة واحدة فقط.
-   *
-   * نحسب العمولة المستحقة للتطبيق من الطلبات
-   * التي أصبحت مكتملة قبل إضافة نظام الديون.
+   * تهيئة ديون المندوبين للطلبات المكتملة
+   * القديمة التي كانت موجودة قبل نظام الديون.
    */
   const debtMarker = await pool.query(
     `SELECT value
@@ -258,7 +263,11 @@ async function init() {
     );
 
     const completedOrders = await pool.query(
-      `SELECT courier_id, final_price
+      `SELECT
+         id,
+         courier_id,
+         final_price,
+         COALESCE(commission_amount, 0) AS commission_amount
        FROM orders
        WHERE status = 'completed'
          AND courier_id IS NOT NULL
@@ -273,18 +282,33 @@ async function init() {
         continue;
       }
 
+      const existingCommission =
+        Number(order.commission_amount || 0);
+
       const commission =
-        Math.round(
-          (finalPrice * commissionPercent) / 100 * 100
-        ) / 100;
+        existingCommission > 0
+          ? existingCommission
+          : Math.round(
+              (finalPrice * commissionPercent) / 100 * 100
+            ) / 100;
 
       if (commission <= 0) {
         continue;
       }
 
+      if (existingCommission <= 0) {
+        await pool.query(
+          `UPDATE orders
+           SET commission_amount = $1
+           WHERE id = $2`,
+          [commission, order.id]
+        );
+      }
+
       await pool.query(
         `UPDATE users
-         SET courier_debt = COALESCE(courier_debt, 0) + $1
+         SET courier_debt =
+           COALESCE(courier_debt, 0) + $1
          WHERE id = $2
            AND role = 'courier'`,
         [commission, courierId]
@@ -300,5 +324,8 @@ async function init() {
 }
 
 init().catch((error) => {
-  console.error("Database initialization error:", error);
+  console.error(
+    "Database initialization error:",
+    error
+  );
 });
