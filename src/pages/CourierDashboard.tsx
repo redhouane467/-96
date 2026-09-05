@@ -47,7 +47,7 @@ interface OnlineResponse {
   };
 }
 
-const LOCATION_SEND_INTERVAL_MS = 15000;
+const LOCATION_SEND_INTERVAL_MS = 5000;
 
 function toBoolean(value: boolean | number | string | undefined) {
   return (
@@ -190,6 +190,12 @@ export default function CourierDashboard({
     fetchStats();
   }, []);
 
+  const hasActiveOrder = orders.some(
+    (order) =>
+      order.status === "accepted" ||
+      order.status === "picked_up"
+  );
+
   const toggleOnline = async () => {
     if (changingOnline) {
       return;
@@ -198,6 +204,15 @@ export default function CourierDashboard({
     if (approved !== true) {
       toast(
         "حساب المندوب غير معتمد من الإدارة",
+        "error"
+      );
+
+      return;
+    }
+
+    if (online && hasActiveOrder) {
+      toast(
+        "لا يمكنك إيقاف الاتصال أثناء وجود طلب قيد التوصيل",
         "error"
       );
 
@@ -281,12 +296,15 @@ export default function CourierDashboard({
   useEffect(() => {
     if (
       !online ||
-      approved !== true
+      approved !== true ||
+      !hasActiveOrder
     ) {
       stopWatchRef.current?.();
       stopWatchRef.current = null;
       return;
     }
+
+    lastSentRef.current = 0;
 
     stopWatchRef.current =
       watchPosition(
@@ -330,7 +348,7 @@ export default function CourierDashboard({
     };
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [online, approved]);
+  }, [online, approved, hasActiveOrder]);
 
   const handleAction = async (
     orderId: string,
@@ -494,7 +512,8 @@ export default function CourierDashboard({
           }
           disabled={
             approved !== true ||
-            changingOnline
+            changingOnline ||
+            (online && hasActiveOrder)
           }
           className={`px-5 py-2 rounded-full font-bold text-sm transition disabled:opacity-40 ${
             online
