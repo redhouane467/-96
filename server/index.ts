@@ -120,6 +120,199 @@ async function attachCourierInfo(
 }
 
 /* =========================
+   OLD DELIVERED ORDERS
+   تحويل الطلبات القديمة التي
+   بقيت delivered إلى completed
+   وحساب العمولة مرة واحدة
+========================= */
+
+async function migrateOldDeliveredOrders() {
+  const markerKey =
+    "courier_delivered_migration_v1";
+
+  try {
+    const marker =
+      await pool.query(
+        `SELECT value
+         FROM settings
+         WHERE key=$1
+         LIMIT 1`,
+        [markerKey]
+      );
+
+    if (marker.rows.length) {
+      return;
+    }
+
+    const settings =
+      await getSettings();
+
+    const commissionPercent =
+      Number(
+        settings.commission_percent ??
+          20
+      );
+
+    const delivered =
+      await pool.query(
+        `SELECT
+           id,
+           courier_id,
+           final_price
+         FROM orders
+         WHERE status='delivered'
+           AND courier_id IS NOT NULL
+           AND final_price IS NOT NULL`
+      );
+
+    for (const order of delivered.rows) {
+      const client =
+        await pool.connect();
+
+      try {
+        await client.query(
+          "BEGIN"
+        );
+
+        const locked =
+          await client.query(
+            `SELECT
+               id,
+               courier_id,
+               final_price,
+               status
+             FROM orders
+             WHERE id=$1
+             FOR UPDATE`,
+            [order.id]
+          );
+
+        if (
+          !locked.rows.length ||
+          locked.rows[0].status !==
+            "delivered"
+        ) {
+          await client.query(
+            "ROLLBACK"
+          );
+          client.release();
+          continue;
+        }
+
+        const courierId =
+          locked.rows[0].courier_id;
+
+        const finalPrice =
+          Number(
+            locked.rows[0].final_price ||
+              0
+          );
+
+        if (
+          courierId &&
+          finalPrice > 0
+        ) {
+          const commission =
+            Math.round(
+              (
+                (finalPrice *
+                  commissionPercent) /
+                100
+              ) * 100
+            ) / 100;
+
+          if (commission > 0) {
+            await client.query(
+              `UPDATE users
+               SET
+                 courier_debt =
+                   COALESCE(
+                     courier_debt,
+                     0
+                   ) + $1
+               WHERE id=$2
+                 AND role='courier'`,
+              [
+                commission,
+                courierId,
+              ]
+            );
+          }
+        }
+
+        const now =
+          new Date().toISOString();
+
+        const completed =
+          await client.query(
+            `UPDATE orders
+             SET
+               status='completed',
+               updated_at=$1
+             WHERE id=$2
+               AND status='delivered'
+             RETURNING *`,
+            [
+              now,
+              order.id,
+            ]
+          );
+
+        if (completed.rows.length) {
+          await client.query(
+            `INSERT INTO order_status_history
+             (id, order_id, status, created_at)
+             VALUES ($1,$2,$3,$4)`,
+            [
+              id(),
+              order.id,
+              "completed",
+              now,
+            ]
+          );
+        }
+
+        await client.query(
+          "COMMIT"
+        );
+      } catch (error) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        console.error(
+          "old delivered migration error:",
+          error
+        );
+      } finally {
+        client.release();
+      }
+    }
+
+    await pool.query(
+      `INSERT INTO settings
+       (key,value)
+       VALUES ($1,$2)
+       ON CONFLICT(key)
+       DO NOTHING`,
+      [
+        markerKey,
+        "1",
+      ]
+    );
+
+    console.log(
+      `Old delivered orders migration completed: ${delivered.rows.length}`
+    );
+  } catch (error) {
+    console.error(
+      "old delivered orders migration failed:",
+      error
+    );
+  }
+}
+
+/* =========================
    AUTH
 ========================= */
 
@@ -524,6 +717,22 @@ app.post(
         });
       }
 
+      const latitude =
+        Number(lat);
+
+      const longitude =
+        Number(lng);
+
+      if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+      ) {
+        return res.status(400).json({
+          error:
+            "الموقع غير صالح",
+        });
+      }
+
       const result =
         await pool.query(
           `UPDATE users
@@ -539,8 +748,8 @@ app.post(
              lng,
              location_updated_at`,
           [
-            Number(lat),
-            Number(lng),
+            latitude,
+            longitude,
             new Date().toISOString(),
             req.user!.id,
           ]
@@ -997,6 +1206,9 @@ app.post(
 
 /* =========================
    DELIVER
+   التوصيل = إكمال الطلب
+   + حساب العمولة مباشرة
+   + إضافة الدين للمندوب
 ========================= */
 
 app.post(
@@ -1004,40 +1216,183 @@ app.post(
   auth,
   role("courier"),
   async (req, res) => {
+    const client =
+      await pool.connect();
+
     try {
-      const result =
-        await pool.query(
-          `UPDATE orders
-           SET
-             status='delivered',
-             updated_at=$1
-           WHERE id=$2
-             AND courier_id=$3
+      await client.query(
+        "BEGIN"
+      );
+
+      const orderResult =
+        await client.query(
+          `SELECT *
+           FROM orders
+           WHERE id=$1
+             AND courier_id=$2
              AND status='picked_up'
-           RETURNING *`,
+           FOR UPDATE`,
           [
-            new Date().toISOString(),
             req.params.id,
             req.user!.id,
           ]
         );
 
-      if (!result.rows.length) {
+      if (
+        !orderResult.rows.length
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
         return res.status(409).json({
           error:
             "لا يمكن إنهاء التوصيل الآن",
         });
       }
 
-      await recordStatus(
-        req.params.id,
-        "delivered"
+      const order =
+        orderResult.rows[0];
+
+      const settings =
+        await getSettings();
+
+      const commissionPercent =
+        Number(
+          settings.commission_percent ??
+            20
+        );
+
+      const finalPrice =
+        Number(
+          order.final_price || 0
+        );
+
+      const commission =
+        Math.round(
+          (
+            (finalPrice *
+              commissionPercent) /
+            100
+          ) * 100
+        ) / 100;
+
+      const now =
+        new Date().toISOString();
+
+      const completed =
+        await client.query(
+          `UPDATE orders
+           SET
+             status='completed',
+             updated_at=$1
+           WHERE id=$2
+             AND courier_id=$3
+             AND status='picked_up'
+           RETURNING *`,
+          [
+            now,
+            req.params.id,
+            req.user!.id,
+          ]
+        );
+
+      if (
+        !completed.rows.length
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(409).json({
+          error:
+            "تعذر إكمال الطلب",
+        });
+      }
+
+      /*
+       * نسجل مرحلتي التسليم والإكمال.
+       * الطلب أصبح completed مباشرة.
+       */
+
+      await client.query(
+        `INSERT INTO order_status_history
+         (id, order_id, status, created_at)
+         VALUES ($1,$2,$3,$4)`,
+        [
+          id(),
+          req.params.id,
+          "delivered",
+          now,
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO order_status_history
+         (id, order_id, status, created_at)
+         VALUES ($1,$2,$3,$4)`,
+        [
+          id(),
+          req.params.id,
+          "completed",
+          now,
+        ]
+      );
+
+      if (commission > 0) {
+        await client.query(
+          `UPDATE users
+           SET
+             courier_debt =
+               COALESCE(
+                 courier_debt,
+                 0
+               ) + $1
+           WHERE id=$2
+             AND role='courier'`,
+          [
+            commission,
+            req.user!.id,
+          ]
+        );
+      }
+
+      const debtResult =
+        await client.query(
+          `SELECT
+             COALESCE(
+               courier_debt,
+               0
+             ) AS courier_debt
+           FROM users
+           WHERE id=$1
+             AND role='courier'`,
+          [req.user!.id]
+        );
+
+      await client.query(
+        "COMMIT"
       );
 
       return res.json({
-        order: result.rows[0],
+        order:
+          completed.rows[0],
+        commission,
+        courier_debt:
+          Number(
+            debtResult.rows[0]
+              ?.courier_debt || 0
+          ),
       });
     } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {
+        // ignore rollback error
+      }
+
       console.error(
         "deliver error:",
         error
@@ -1045,8 +1400,10 @@ app.post(
 
       return res.status(500).json({
         error:
-          "حدث خطأ في الخادم",
+          "حدث خطأ أثناء إنهاء التوصيل وحساب العمولة",
       });
+    } finally {
+      client.release();
     }
   }
 );
@@ -1111,7 +1468,9 @@ app.post(
 );
 
 /* =========================
-   RATING + COMMISSION
+   RATING
+   التقييم اختياري ولا يحسب
+   العمولة ولا يكمل الطلب
 ========================= */
 
 app.post(
@@ -1165,9 +1524,19 @@ app.post(
       const order =
         orderResult.rows[0];
 
+      /*
+       * بعد التعديل الطلب يصبح completed
+       * مباشرة عند ضغط المندوب على تم التوصيل.
+       *
+       * نسمح أيضًا بـ delivered للطلبات
+       * القديمة التي ربما لم تتم هجرتها بعد.
+       */
+
       if (
         order.status !==
-        "delivered"
+          "completed" &&
+        order.status !==
+          "delivered"
       ) {
         return res.status(400).json({
           error:
@@ -1198,95 +1567,47 @@ app.post(
         });
       }
 
-      const settings =
-        await getSettings();
-
-      const commissionPercent =
-        Number(
-          settings.commission_percent ??
-            20
-        );
-
-      const finalPrice =
-        Number(
-          order.final_price || 0
-        );
-
-      const commission =
-        Math.round(
-          (
-            (finalPrice *
-              commissionPercent) /
-            100
-          ) * 100
-        ) / 100;
-
-      await pool.query(
-        `INSERT INTO ratings
-         (
-           id,
-           order_id,
-           customer_id,
-           courier_id,
-           stars,
-           comment,
-           created_at
-         )
-         VALUES
-         ($1,$2,$3,$4,$5,$6,$7)`,
-        [
-          id(),
-          req.params.id,
-          req.user!.id,
-          order.courier_id,
-          rating,
-          comment ??
-            null,
-          new Date().toISOString(),
-        ]
-      );
-
-      if (commission > 0) {
+      const ratingResult =
         await pool.query(
-          `UPDATE users
-           SET
-             courier_debt =
-               COALESCE(
-                 courier_debt,
-                 0
-               ) + $1
-           WHERE id=$2
-             AND role='courier'`,
-          [
-            commission,
-            order.courier_id,
-          ]
-        );
-      }
-
-      const completed =
-        await pool.query(
-          `UPDATE orders
-           SET
-             status='completed',
-             updated_at=$1
-           WHERE id=$2
+          `INSERT INTO ratings
+           (
+             id,
+             order_id,
+             customer_id,
+             courier_id,
+             stars,
+             comment,
+             created_at
+           )
+           VALUES
+           ($1,$2,$3,$4,$5,$6,$7)
            RETURNING *`,
           [
-            new Date().toISOString(),
+            id(),
             req.params.id,
+            req.user!.id,
+            order.courier_id,
+            rating,
+            comment ??
+              null,
+            new Date().toISOString(),
           ]
         );
 
-      await recordStatus(
-        req.params.id,
-        "completed"
-      );
+      /*
+       * مهم:
+       * لا نحسب العمولة هنا.
+       * لا نضيف دينًا هنا.
+       * لا نغير حالة الطلب هنا.
+       *
+       * العمولة والدين تم حسابهما عند
+       * ضغط المندوب على "تم التوصيل".
+       */
 
       return res.json({
-        order:
-          completed.rows[0],
-        commission,
+        order,
+        rating:
+          ratingResult.rows[0],
       });
     } catch (error) {
       console.error(
@@ -1963,12 +2284,25 @@ const PORT =
     process.env.PORT
   ) || 3000;
 
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `وصلي يعمل على المنفذ ${PORT}`
+/*
+ * نشغل معالجة الطلبات القديمة أولاً
+ * ثم نفتح السيرفر.
+ */
+migrateOldDeliveredOrders()
+  .catch((error) => {
+    console.error(
+      "startup migration error:",
+      error
     );
-  }
-);
+  })
+  .finally(() => {
+    app.listen(
+      PORT,
+      "0.0.0.0",
+      () => {
+        console.log(
+          `وصلي يعمل على المنفذ ${PORT}`
+        );
+      }
+    );
+  });
