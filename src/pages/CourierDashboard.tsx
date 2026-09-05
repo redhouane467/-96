@@ -74,7 +74,6 @@ export default function CourierDashboard({
 
   const [online, setOnline] = useState(false);
   const [approved, setApproved] = useState<boolean | null>(null);
-
   const [changingOnline, setChangingOnline] = useState(false);
 
   const [locationStatus, setLocationStatus] = useState<
@@ -86,26 +85,23 @@ export default function CourierDashboard({
   const toast = useToast();
 
   const lastSentRef = useRef(0);
-  const stopWatchRef = useRef<(() => void) | null>(null);
   const watchIdRef = useRef<number | null>(null);
 
   const fetchMe = async () => {
     try {
       const response = await api<MeResponse>("/auth/me");
 
-      const me = response.user;
-
-      if (!me) {
+      if (!response.user) {
         return;
       }
 
-      const serverApproved = toBoolean(me.approved);
-      const serverOnline = toBoolean(me.online);
+      const serverApproved = toBoolean(response.user.approved);
+      const serverOnline = toBoolean(response.user.online);
 
       setApproved(serverApproved);
-      setOnline(serverApproved ? serverOnline : false);
+      setOnline(serverOnline);
     } catch {
-      // تجاهل فشل تحديث بيانات المندوب
+      // لا نوقف الصفحة بسبب فشل تحديث بيانات الحساب
     }
   };
 
@@ -194,7 +190,9 @@ export default function CourierDashboard({
 
       if (showSuccess) {
         setLocationStatus("success");
-        setLocationMessage("تم تحديد موقعك وإرساله بنجاح");
+        setLocationMessage(
+          "تم تحديد موقعك وإرساله بنجاح"
+        );
       }
 
       return true;
@@ -211,7 +209,7 @@ export default function CourierDashboard({
   };
 
   const locateMe = () => {
-    if (!approved) {
+    if (approved !== true) {
       toast(
         "حسابك غير معتمد من الإدارة",
         "error"
@@ -232,18 +230,14 @@ export default function CourierDashboard({
 
     navigator.geolocation.getCurrentPosition(
       async (position) => {
-        const latitude = position.coords.latitude;
-        const longitude = position.coords.longitude;
-
         await sendLocation(
-          latitude,
-          longitude,
+          position.coords.latitude,
+          position.coords.longitude,
           true
         );
       },
       (error) => {
-        let message =
-          "تعذر تحديد موقعك";
+        let message = "تعذر تحديد موقعك";
 
         if (error.code === 1) {
           message =
@@ -274,9 +268,6 @@ export default function CourierDashboard({
       );
       watchIdRef.current = null;
     }
-
-    stopWatchRef.current?.();
-    stopWatchRef.current = null;
   };
 
   const startLocationWatch = () => {
@@ -297,20 +288,13 @@ export default function CourierDashboard({
       "جاري تشغيل التتبع وتحديد موقعك…"
     );
 
-    const watchId =
+    watchIdRef.current =
       navigator.geolocation.watchPosition(
         async (position) => {
-          const latitude =
-            position.coords.latitude;
-
-          const longitude =
-            position.coords.longitude;
-
           const now = Date.now();
 
           if (
-            now -
-              lastSentRef.current <
+            now - lastSentRef.current <
             LOCATION_SEND_INTERVAL_MS
           ) {
             return;
@@ -320,8 +304,8 @@ export default function CourierDashboard({
 
           const success =
             await sendLocation(
-              latitude,
-              longitude,
+              position.coords.latitude,
+              position.coords.longitude,
               false
             );
 
@@ -356,8 +340,6 @@ export default function CourierDashboard({
           timeout: 20000,
         }
       );
-
-    watchIdRef.current = watchId;
   };
 
   const toggleOnline = async () => {
@@ -368,14 +350,6 @@ export default function CourierDashboard({
     if (approved !== true) {
       toast(
         "حساب المندوب غير معتمد من الإدارة",
-        "error"
-      );
-      return;
-    }
-
-    if (online && hasActiveOrder) {
-      toast(
-        "لا يمكنك إيقاف الاتصال أثناء وجود طلب قيد التوصيل",
         "error"
       );
       return;
@@ -397,32 +371,24 @@ export default function CourierDashboard({
           }
         );
 
-      const serverUser =
-        response.user;
-
-      if (!serverUser) {
+      if (!response.user) {
         throw new Error(
-          "لم يرجع الخادم بيانات حالة الاتصال"
+          "الخادم لم يرجع بيانات المندوب"
         );
       }
 
       const serverApproved =
         toBoolean(
-          serverUser.approved
+          response.user.approved
         );
 
       const serverOnline =
         toBoolean(
-          serverUser.online
+          response.user.online
         );
 
       setApproved(serverApproved);
-
-      setOnline(
-        serverApproved
-          ? serverOnline
-          : false
-      );
+      setOnline(serverOnline);
 
       if (!serverApproved) {
         toast(
@@ -553,14 +519,12 @@ export default function CourierDashboard({
 
   const availableOrders =
     orders.filter(
-      (o) =>
-        o.status === "pending"
+      (o) => o.status === "pending"
     );
 
   const myOrders =
     orders.filter(
-      (o) =>
-        o.status !== "pending"
+      (o) => o.status !== "pending"
     );
 
   const currentDebt =
@@ -637,8 +601,7 @@ export default function CourierDashboard({
             onClick={toggleOnline}
             disabled={
               approved !== true ||
-              changingOnline ||
-              (online && hasActiveOrder)
+              changingOnline
             }
             className={`px-5 py-2 rounded-full font-bold text-sm transition disabled:opacity-40 ${
               online
@@ -1009,3 +972,7 @@ export default function CourierDashboard({
     </div>
   );
 }
+
+[/writing]
+بعد الحفظ، اعمل Commit وانتظر إعادة النشر ثم افتح لوحة المندوب من جديد.
+أهم تغيير هنا: زر الاتصال لم يعد يُمنع بسبب وجود طلب نشط؛ حالة الاتصال نفسها أصبحت هي التي تتحكم في الزر، بينما يبقى تتبع GPS مرتبطًا بالطلب النشط كما هو.
