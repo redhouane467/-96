@@ -14,16 +14,25 @@ app.use(cors());
 app.use(express.json({ limit: "8mb" }));
 
 async function getSettings() {
-  const result = await pool.query("SELECT key,value FROM settings");
+  const result = await pool.query(
+    "SELECT key,value FROM settings"
+  );
+
   const rows = result.rows as any[];
-  return Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
+
+  return Object.fromEntries(
+    rows.map((r) => [r.key, Number(r.value)])
+  );
 }
 
 async function calcPrice(
   distanceKm: number,
   offeredPrice?: number | null
 ) {
-  if (offeredPrice !== null && offeredPrice !== undefined) {
+  if (
+    offeredPrice !== null &&
+    offeredPrice !== undefined
+  ) {
     return Number(offeredPrice);
   }
 
@@ -31,16 +40,23 @@ async function calcPrice(
 
   return (
     s.base_price +
-    Math.max(0, distanceKm - s.base_distance_km) *
-      s.extra_km_price
+    Math.max(
+      0,
+      distanceKm - s.base_distance_km
+    ) * s.extra_km_price
   );
 }
 
 function sanitizeForCourier(rows: any[]) {
-  return rows.map(({ confirmation_code, ...rest }) => rest);
+  return rows.map(
+    ({ confirmation_code, ...rest }) => rest
+  );
 }
 
-async function recordStatus(orderId: string, status: string) {
+async function recordStatus(
+  orderId: string,
+  status: string
+) {
   await pool.query(
     "INSERT INTO order_status_history VALUES($1,$2,$3,$4)",
     [
@@ -53,7 +69,9 @@ async function recordStatus(orderId: string, status: string) {
 }
 
 async function attachCourierInfo(order: any) {
-  if (!order.courier_id) return order;
+  if (!order.courier_id) {
+    return order;
+  }
 
   const c: any = (
     await pool.query(
@@ -70,7 +88,9 @@ async function attachCourierInfo(order: any) {
     )
   ).rows[0];
 
-  if (!c) return order;
+  if (!c) {
+    return order;
+  }
 
   return {
     ...order,
@@ -80,7 +100,8 @@ async function attachCourierInfo(order: any) {
       online: !!c.online,
       lat: c.lat,
       lng: c.lng,
-      location_updated_at: c.location_updated_at,
+      location_updated_at:
+        c.location_updated_at,
     },
   };
 }
@@ -102,7 +123,9 @@ app.post("/api/auth/register", async (req, res) => {
     idCard,
   } = req.body;
 
-  const normalizedPhone = String(phone || "").trim();
+  const normalizedPhone = String(
+    phone || ""
+  ).trim();
 
   if (
     !name ||
@@ -116,7 +139,9 @@ app.post("/api/auth/register", async (req, res) => {
     });
   }
 
-  if (!["customer", "courier"].includes(r)) {
+  if (
+    !["customer", "courier"].includes(r)
+  ) {
     return res.status(400).json({
       error: "الدور غير صالح",
     });
@@ -125,11 +150,14 @@ app.post("/api/auth/register", async (req, res) => {
   let idCardBuffer: Buffer | null = null;
   let idCardMime: string | null = null;
 
-  // بطاقة التعريف مطلوبة للمندوب
   if (r === "courier") {
-    if (!idCard?.data || !idCard?.mime) {
+    if (
+      !idCard?.data ||
+      !idCard?.mime
+    ) {
       return res.status(400).json({
-        error: "بطاقة التعريف مطلوبة للمندوب",
+        error:
+          "بطاقة التعريف مطلوبة للمندوب",
       });
     }
 
@@ -139,9 +167,12 @@ app.post("/api/auth/register", async (req, res) => {
       "image/webp",
     ];
 
-    if (!allowedMime.includes(idCard.mime)) {
+    if (
+      !allowedMime.includes(idCard.mime)
+    ) {
       return res.status(400).json({
-        error: "صيغة بطاقة التعريف غير مدعومة",
+        error:
+          "صيغة بطاقة التعريف غير مدعومة",
       });
     }
 
@@ -152,12 +183,15 @@ app.post("/api/auth/register", async (req, res) => {
       );
     } catch {
       return res.status(400).json({
-        error: "ملف بطاقة التعريف غير صالح",
+        error:
+          "ملف بطاقة التعريف غير صالح",
       });
     }
 
-    // الحد الأقصى 4 ميغابايت
-    if (idCardBuffer.length > 4 * 1024 * 1024) {
+    if (
+      idCardBuffer.length >
+      4 * 1024 * 1024
+    ) {
       return res.status(400).json({
         error:
           "حجم بطاقة التعريف يجب ألا يتجاوز 4MB",
@@ -177,15 +211,15 @@ app.post("/api/auth/register", async (req, res) => {
 
     if (existing) {
       return res.status(409).json({
-        error: "رقم الهاتف مستخدم بالفعل",
+        error:
+          "رقم الهاتف مستخدم بالفعل",
       });
     }
 
     const id = crypto.randomUUID();
 
-    // العميل يعتمد مباشرة
-    // المندوب يحتاج موافقة الإدارة
-    const approved = r === "customer" ? 1 : 0;
+    const approved =
+      r === "customer" ? 1 : 0;
 
     await pool.query(
       `INSERT INTO users(
@@ -199,7 +233,8 @@ app.post("/api/auth/register", async (req, res) => {
         online,
         approved,
         id_card_data,
-        id_card_mime
+        id_card_mime,
+        courier_debt
       )
       VALUES(
         $1,
@@ -212,13 +247,17 @@ app.post("/api/auth/register", async (req, res) => {
         0,
         $7,
         $8,
-        $9
+        $9,
+        0
       )`,
       [
         id,
         String(name).trim(),
         normalizedPhone,
-        bcrypt.hashSync(password, 12),
+        bcrypt.hashSync(
+          password,
+          12
+        ),
         r,
         new Date().toISOString(),
         approved,
@@ -241,10 +280,14 @@ app.post("/api/auth/register", async (req, res) => {
       approved: !!approved,
     });
   } catch (err) {
-    console.error("Register error:", err);
+    console.error(
+      "Register error:",
+      err
+    );
 
     res.status(500).json({
-      error: "تعذر إنشاء الحساب",
+      error:
+        "تعذر إنشاء الحساب",
     });
   }
 });
@@ -289,20 +332,31 @@ app.post("/api/auth/login", async (req, res) => {
   });
 });
 
-app.get("/api/auth/me", auth, async (req, res) => {
-  const row: any = (
-    await pool.query(
-      "SELECT approved, online FROM users WHERE id=$1",
-      [req.user!.id]
-    )
-  ).rows[0];
+app.get(
+  "/api/auth/me",
+  auth,
+  async (req, res) => {
+    const row: any = (
+      await pool.query(
+        `SELECT
+          approved,
+          online,
+          courier_debt
+         FROM users
+         WHERE id=$1`,
+        [req.user!.id]
+      )
+    ).rows[0];
 
-  res.json({
-    user: req.user,
-    approved: !!row?.approved,
-    online: !!row?.online,
-  });
-});
+    res.json({
+      user: req.user,
+      approved: !!row?.approved,
+      online: !!row?.online,
+      courier_debt:
+        Number(row?.courier_debt || 0),
+    });
+  }
+);
 
 // =====================================================
 // COURIER PRESENCE & LOCATION
@@ -313,11 +367,15 @@ app.patch(
   auth,
   role("courier"),
   async (req, res) => {
-    const online = req.body.online ? 1 : 0;
+    const online =
+      req.body.online ? 1 : 0;
 
     await pool.query(
       "UPDATE users SET online=$1 WHERE id=$2",
-      [online, req.user!.id]
+      [
+        online,
+        req.user!.id,
+      ]
     );
 
     res.json({
@@ -332,15 +390,21 @@ app.patch(
   auth,
   role("courier"),
   async (req, res) => {
-    const lat = Number(req.body.lat);
-    const lng = Number(req.body.lng);
+    const lat = Number(
+      req.body.lat
+    );
+
+    const lng = Number(
+      req.body.lng
+    );
 
     if (
       !Number.isFinite(lat) ||
       !Number.isFinite(lng)
     ) {
       return res.status(400).json({
-        error: "إحداثيات غير صالحة",
+        error:
+          "إحداثيات غير صالحة",
       });
     }
 
@@ -371,7 +435,10 @@ app.get(
       await pool.query(
         `SELECT
           COUNT(*) c,
-          COALESCE(SUM(final_price),0) r
+          COALESCE(
+            SUM(final_price),
+            0
+          ) r
          FROM orders
          WHERE courier_id=$1
            AND status='completed'`,
@@ -379,26 +446,50 @@ app.get(
       )
     ).rows[0];
 
-    const s = await getSettings();
+    const debtRow: any = (
+      await pool.query(
+        `SELECT
+          COALESCE(courier_debt,0)
+          AS debt
+         FROM users
+         WHERE id=$1
+           AND role='courier'`,
+        [req.user!.id]
+      )
+    ).rows[0];
+
+    const s =
+      await getSettings();
 
     const commissionPercent =
       s.commission_percent ?? 20;
 
-    const totalRevenue = row.r;
+    const totalRevenue =
+      Number(row.r || 0);
 
-    const appCommission = Math.round(
-      totalRevenue *
-        (commissionPercent / 100)
-    );
+    const appCommission =
+      Math.round(
+        totalRevenue *
+          (commissionPercent / 100)
+      );
 
     const courierEarnings =
-      totalRevenue - appCommission;
+      totalRevenue -
+      appCommission;
+
+    const debt =
+      Number(
+        debtRow?.debt || 0
+      );
 
     res.json({
-      ordersCount: row.c,
+      ordersCount: Number(
+        row.c || 0
+      ),
       totalRevenue,
       appCommission,
       courierEarnings,
+      debt,
     });
   }
 );
@@ -407,101 +498,124 @@ app.get(
 // ORDERS
 // =====================================================
 
-app.get("/api/orders", auth, async (req, res) => {
-  const u = req.user!;
+app.get(
+  "/api/orders",
+  auth,
+  async (req, res) => {
+    const u = req.user!;
 
-  let rows: any[];
+    let rows: any[];
 
-  if (u.role === "customer") {
-    rows = (
-      await pool.query(
-        `SELECT *
-         FROM orders
-         WHERE customer_id=$1
-         ORDER BY created_at DESC`,
-        [u.id]
-      )
-    ).rows;
+    if (u.role === "customer") {
+      rows = (
+        await pool.query(
+          `SELECT *
+           FROM orders
+           WHERE customer_id=$1
+           ORDER BY created_at DESC`,
+          [u.id]
+        )
+      ).rows;
 
-    rows = await Promise.all(
-      rows.map(attachCourierInfo)
-    );
-  } else if (u.role === "courier") {
-    rows = (
-      await pool.query(
-        `SELECT *
-         FROM orders
-         WHERE status='pending'
-            OR courier_id=$1
-         ORDER BY created_at DESC`,
-        [u.id]
-      )
-    ).rows;
-
-    const me: any = (
-      await pool.query(
-        "SELECT lat,lng FROM users WHERE id=$1",
-        [u.id]
-      )
-    ).rows[0];
-
-    if (
-      me?.lat != null &&
-      me?.lng != null
+      rows = await Promise.all(
+        rows.map(
+          attachCourierInfo
+        )
+      );
+    } else if (
+      u.role === "courier"
     ) {
-      rows = rows.map((o) => {
-        if (
-          o.pickup_lat != null &&
-          o.pickup_lng != null
-        ) {
-          return {
-            ...o,
-            distance_from_me_km:
-              round1(
-                haversineKm(
-                  me.lat,
-                  me.lng,
-                  o.pickup_lat,
-                  o.pickup_lng
-                )
-              ),
-          };
-        }
+      rows = (
+        await pool.query(
+          `SELECT *
+           FROM orders
+           WHERE status='pending'
+              OR courier_id=$1
+           ORDER BY created_at DESC`,
+          [u.id]
+        )
+      ).rows;
 
-        return o;
-      });
+      const me: any = (
+        await pool.query(
+          `SELECT
+            lat,
+            lng
+           FROM users
+           WHERE id=$1`,
+          [u.id]
+        )
+      ).rows[0];
 
-      rows.sort((a, b) => {
-        if (
-          a.status === "pending" &&
-          b.status === "pending"
-        ) {
-          const da =
-            a.distance_from_me_km ??
-            Infinity;
+      if (
+        me?.lat != null &&
+        me?.lng != null
+      ) {
+        rows = rows.map(
+          (o) => {
+            if (
+              o.pickup_lat != null &&
+              o.pickup_lng != null
+            ) {
+              return {
+                ...o,
+                distance_from_me_km:
+                  round1(
+                    haversineKm(
+                      me.lat,
+                      me.lng,
+                      o.pickup_lat,
+                      o.pickup_lng
+                    )
+                  ),
+              };
+            }
 
-          const db_ =
-            b.distance_from_me_km ??
-            Infinity;
+            return o;
+          }
+        );
 
-          return da - db_;
-        }
+        rows.sort(
+          (a, b) => {
+            if (
+              a.status ===
+                "pending" &&
+              b.status ===
+                "pending"
+            ) {
+              const da =
+                a.distance_from_me_km ??
+                Infinity;
 
-        return 0;
-      });
+              const db_ =
+                b.distance_from_me_km ??
+                Infinity;
+
+              return da - db_;
+            }
+
+            return 0;
+          }
+        );
+      }
+
+      rows =
+        sanitizeForCourier(
+          rows
+        );
+    } else {
+      rows = (
+        await pool.query(
+          `SELECT *
+           FROM orders
+           ORDER BY created_at DESC`
+        )
+      ).rows;
     }
 
-    rows = sanitizeForCourier(rows);
-  } else {
-    rows = (
-      await pool.query(
-        "SELECT * FROM orders ORDER BY created_at DESC"
-      )
-    ).rows;
+    res.json({ orders: rows });
   }
-
-  res.json({ orders: rows });
-});
+);
 
 app.get(
   "/api/orders/:id",
@@ -509,35 +623,28 @@ app.get(
   async (req, res) => {
     const o: any = (
       await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
+        `SELECT *
+         FROM orders
+         WHERE id=$1`,
         [req.params.id]
       )
     ).rows[0];
 
     if (!o) {
       return res.status(404).json({
-        error: "الطلب غير موجود",
+        error:
+          "الطلب غير موجود",
       });
     }
 
     const u = req.user!;
 
-    if (u.role === "customer") {
-      if (o.customer_id !== u.id) {
-        return res.status(403).json({
-          error: "غير مصرح",
-        });
-      }
-
-      return res.json({
-        order: await attachCourierInfo(o),
-      });
-    }
-
-    if (u.role === "courier") {
+    if (
+      u.role === "customer"
+    ) {
       if (
-        o.status !== "pending" &&
-        o.courier_id !== u.id
+        o.customer_id !==
+        u.id
       ) {
         return res.status(403).json({
           error: "غير مصرح",
@@ -546,12 +653,39 @@ app.get(
 
       return res.json({
         order:
-          sanitizeForCourier([o])[0],
+          await attachCourierInfo(
+            o
+          ),
+      });
+    }
+
+    if (
+      u.role === "courier"
+    ) {
+      if (
+        o.status !==
+          "pending" &&
+        o.courier_id !==
+          u.id
+      ) {
+        return res.status(403).json({
+          error: "غير مصرح",
+        });
+      }
+
+      return res.json({
+        order:
+          sanitizeForCourier(
+            [o]
+          )[0],
       });
     }
 
     res.json({
-      order: await attachCourierInfo(o),
+      order:
+        await attachCourierInfo(
+          o
+        ),
     });
   }
 );
@@ -562,14 +696,17 @@ app.get(
   async (req, res) => {
     const o: any = (
       await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
+        `SELECT *
+         FROM orders
+         WHERE id=$1`,
         [req.params.id]
       )
     ).rows[0];
 
     if (!o) {
       return res.status(404).json({
-        error: "الطلب غير موجود",
+        error:
+          "الطلب غير موجود",
       });
     }
 
@@ -588,7 +725,9 @@ app.get(
 
     const history = (
       await pool.query(
-        `SELECT status, created_at
+        `SELECT
+          status,
+          created_at
          FROM order_status_history
          WHERE order_id=$1
          ORDER BY created_at ASC`,
@@ -614,10 +753,12 @@ app.get(
 
     if (
       !o ||
-      o.customer_id !== req.user!.id
+      o.customer_id !==
+        req.user!.id
     ) {
       return res.status(404).json({
-        error: "الطلب غير موجود",
+        error:
+          "الطلب غير موجود",
       });
     }
 
@@ -630,11 +771,14 @@ app.get(
       });
     }
 
-    const s = await getSettings();
+    const s =
+      await getSettings();
 
     const couriers: any[] = (
       await pool.query(
-        `SELECT lat,lng
+        `SELECT
+          lat,
+          lng
          FROM users
          WHERE role='courier'
            AND online=1
@@ -643,15 +787,17 @@ app.get(
       )
     ).rows;
 
-    const count = couriers.filter(
-      (c) =>
-        haversineKm(
-          o.pickup_lat,
-          o.pickup_lng,
-          c.lat,
-          c.lng
-        ) <= s.search_radius_km
-    ).length;
+    const count =
+      couriers.filter(
+        (c) =>
+          haversineKm(
+            o.pickup_lat,
+            o.pickup_lng,
+            c.lat,
+            c.lng
+          ) <=
+          s.search_radius_km
+      ).length;
 
     res.json({ count });
   }
@@ -672,7 +818,6 @@ app.post(
       distance_km,
       offered_price,
       package_description,
-      recipient_phone,
       notes,
     } = req.body;
 
@@ -681,7 +826,8 @@ app.post(
       !delivery_address
     ) {
       return res.status(400).json({
-        error: "العناوين مطلوبة",
+        error:
+          "العناوين مطلوبة",
       });
     }
 
@@ -696,7 +842,9 @@ app.post(
       (v) =>
         v !== undefined &&
         v !== null &&
-        Number.isFinite(Number(v))
+        Number.isFinite(
+          Number(v)
+        )
     );
 
     if (hasCoords) {
@@ -709,10 +857,13 @@ app.post(
         )
       );
     } else if (
-      distance_km !== undefined &&
+      distance_km !==
+        undefined &&
       distance_km !== null
     ) {
-      d = Number(distance_km);
+      d = Number(
+        distance_km
+      );
     } else {
       return res.status(400).json({
         error:
@@ -720,22 +871,38 @@ app.post(
       });
     }
 
-    const price = await calcPrice(
-      d,
-      offered_price
-    );
+    const price =
+      await calcPrice(
+        d,
+        offered_price
+      );
 
-    const id = crypto.randomUUID();
+    const id =
+      crypto.randomUUID();
 
     const now =
       new Date().toISOString();
 
-    const code = String(
-      Math.floor(
-        100000 +
-          Math.random() * 900000
+    /*
+     * يتم أخذ رقم العميل تلقائيًا من
+     * حسابه، ولا يحتاج العميل لإدخاله.
+     */
+    const customer: any = (
+      await pool.query(
+        `SELECT phone
+         FROM users
+         WHERE id=$1
+           AND role='customer'`,
+        [req.user!.id]
       )
-    );
+    ).rows[0];
+
+    if (!customer?.phone) {
+      return res.status(400).json({
+        error:
+          "تعذر الحصول على رقم هاتف العميل",
+      });
+    }
 
     await pool.query(
       `INSERT INTO orders(
@@ -780,13 +947,27 @@ app.post(
           ? Number(delivery_lng)
           : null,
         d,
-        package_description || null,
-        recipient_phone || null,
+        package_description ||
+          null,
+
+        /*
+         * رقم العميل نفسه هو هاتف المستلم
+         * في الطلب.
+         */
+        customer.phone,
+
         notes || null,
         offered_price ?? null,
         price,
         "pending",
-        code,
+
+        /*
+         * لم يعد هناك رمز تأكيد.
+         * العمود القديم يبقى في قاعدة البيانات
+         * فقط لتجنب الحاجة إلى حذف العمود.
+         */
+        null,
+
         now,
         now,
       ]
@@ -802,7 +983,6 @@ app.post(
       id,
       final_price: price,
       distance_km: d,
-      confirmation_code: code,
     });
   }
 );
@@ -814,7 +994,9 @@ app.post(
   async (req, res) => {
     const me: any = (
       await pool.query(
-        "SELECT approved FROM users WHERE id=$1",
+        `SELECT approved
+         FROM users
+         WHERE id=$1`,
         [req.user!.id]
       )
     ).rows[0];
@@ -826,23 +1008,25 @@ app.post(
       });
     }
 
-    const r = await pool.query(
-      `UPDATE orders
-       SET courier_id=$1,
-           status='accepted',
-           updated_at=$2
-       WHERE id=$3
-         AND status='pending'`,
-      [
-        req.user!.id,
-        new Date().toISOString(),
-        req.params.id,
-      ]
-    );
+    const r =
+      await pool.query(
+        `UPDATE orders
+         SET courier_id=$1,
+             status='accepted',
+             updated_at=$2
+         WHERE id=$3
+           AND status='pending'`,
+        [
+          req.user!.id,
+          new Date().toISOString(),
+          req.params.id,
+        ]
+      );
 
     if (!r.rowCount) {
       return res.status(409).json({
-        error: "الطلب غير متاح",
+        error:
+          "الطلب غير متاح",
       });
     }
 
@@ -869,16 +1053,22 @@ app.post(
 
     if (
       !o ||
-      o.courier_id !== req.user!.id
+      o.courier_id !==
+        req.user!.id
     ) {
       return res.status(404).json({
-        error: "الطلب غير موجود",
+        error:
+          "الطلب غير موجود",
       });
     }
 
-    if (o.status !== "accepted") {
+    if (
+      o.status !==
+      "accepted"
+    ) {
       return res.status(409).json({
-        error: "حالة الطلب غير صالحة",
+        error:
+          "حالة الطلب غير صالحة",
       });
     }
 
@@ -916,14 +1106,19 @@ app.post(
 
     if (
       !o ||
-      o.courier_id !== req.user!.id
+      o.courier_id !==
+        req.user!.id
     ) {
       return res.status(404).json({
-        error: "الطلب غير موجود",
+        error:
+          "الطلب غير موجود",
       });
     }
 
-    if (o.status !== "accepted") {
+    if (
+      o.status !==
+      "accepted"
+    ) {
       return res.status(409).json({
         error:
           "لا يمكن التراجع عن هذا الطلب الآن",
@@ -964,7 +1159,8 @@ app.post(
 
     if (!o) {
       return res.status(404).json({
-        error: "الطلب غير موجود",
+        error:
+          "الطلب غير موجود",
       });
     }
 
@@ -982,9 +1178,10 @@ app.post(
     }
 
     if (
-      !["pending", "accepted"].includes(
-        o.status
-      )
+      ![
+        "pending",
+        "accepted",
+      ].includes(o.status)
     ) {
       return res.status(409).json({
         error:
@@ -1026,16 +1223,22 @@ app.post(
 
     if (
       !o ||
-      o.courier_id !== req.user!.id
+      o.courier_id !==
+        req.user!.id
     ) {
       return res.status(404).json({
-        error: "الطلب غير موجود",
+        error:
+          "الطلب غير موجود",
       });
     }
 
-    if (o.status !== "picked_up") {
+    if (
+      o.status !==
+      "picked_up"
+    ) {
       return res.status(409).json({
-        error: "حالة الطلب غير صالحة",
+        error:
+          "حالة الطلب غير صالحة",
       });
     }
 
@@ -1060,7 +1263,7 @@ app.post(
 );
 
 // =====================================================
-// RATINGS
+// RATINGS + COURIER DEBT
 // =====================================================
 
 app.post(
@@ -1077,16 +1280,29 @@ app.post(
 
     if (
       !o ||
-      o.customer_id !== req.user!.id
+      o.customer_id !==
+        req.user!.id
     ) {
       return res.status(404).json({
-        error: "الطلب غير موجود",
+        error:
+          "الطلب غير موجود",
       });
     }
 
-    if (o.status !== "delivered") {
+    if (
+      o.status !==
+      "delivered"
+    ) {
       return res.status(409).json({
-        error: "لا يمكن التقييم الآن",
+        error:
+          "لا يمكن التقييم الآن",
+      });
+    }
+
+    if (!o.courier_id) {
+      return res.status(409).json({
+        error:
+          "لا يوجد مندوب مرتبط بهذا الطلب",
       });
     }
 
@@ -1100,36 +1316,82 @@ app.post(
       stars > 5
     ) {
       return res.status(400).json({
-        error: "التقييم غير صالح",
+        error:
+          "التقييم غير صالح",
       });
     }
 
     const existing = (
       await pool.query(
-        "SELECT id FROM ratings WHERE order_id=$1",
+        `SELECT id
+         FROM ratings
+         WHERE order_id=$1`,
         [o.id]
       )
     ).rows[0];
 
     if (existing) {
       return res.status(409).json({
-        error: "تم التقييم مسبقًا",
+        error:
+          "تم التقييم مسبقًا",
       });
     }
 
+    /*
+     * نحصل على نسبة العمولة الحالية.
+     */
+    const settings =
+      await getSettings();
+
+    const commissionPercent =
+      settings.commission_percent ??
+      20;
+
+    /*
+     * عمولة هذا الطلب التي ستصبح دينًا
+     * على المندوب للتطبيق.
+     */
+    const commission =
+      Number(o.final_price || 0) *
+      (commissionPercent / 100);
+
+    /*
+     * تسجيل التقييم.
+     */
     await pool.query(
-      "INSERT INTO ratings VALUES($1,$2,$3,$4,$5,$6,$7)",
+      `INSERT INTO ratings
+       VALUES($1,$2,$3,$4,$5,$6,$7)`,
       [
         crypto.randomUUID(),
         o.id,
         o.customer_id,
         o.courier_id,
         stars,
-        req.body.comment || null,
+        req.body.comment ||
+          null,
         new Date().toISOString(),
       ]
     );
 
+    /*
+     * إضافة عمولة الطلب إلى دين المندوب.
+     */
+    await pool.query(
+      `UPDATE users
+       SET courier_debt =
+         COALESCE(courier_debt,0) +
+         $1
+       WHERE id=$2
+         AND role='courier'`,
+      [
+        commission,
+        o.courier_id,
+      ]
+    );
+
+    /*
+     * بعد التقييم يصبح الطلب مكتملًا.
+     */
     await pool.query(
       `UPDATE orders
        SET status='completed',
@@ -1146,7 +1408,11 @@ app.post(
       "completed"
     );
 
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      commission_added:
+        commission,
+    });
   }
 );
 
@@ -1156,7 +1422,10 @@ app.get(
   async (req, res) => {
     const rows: any[] = (
       await pool.query(
-        `SELECT stars,comment,created_at
+        `SELECT
+          stars,
+          comment,
+          created_at
          FROM ratings
          WHERE courier_id=$1
          ORDER BY created_at DESC`,
@@ -1166,7 +1435,8 @@ app.get(
 
     const avg = rows.length
       ? rows.reduce(
-          (s, x) => s + x.stars,
+          (s, x) =>
+            s + x.stars,
           0
         ) / rows.length
       : 0;
@@ -1174,7 +1444,9 @@ app.get(
     res.json({
       ratings: rows,
       average:
-        Math.round(avg * 10) / 10,
+        Math.round(
+          avg * 10
+        ) / 10,
       count: rows.length,
     });
   }
@@ -1195,7 +1467,8 @@ app.post(
 
     if (!message) {
       return res.status(400).json({
-        error: "الرسالة مطلوبة",
+        error:
+          "الرسالة مطلوبة",
       });
     }
 
@@ -1203,7 +1476,8 @@ app.post(
       new Date().toISOString();
 
     await pool.query(
-      "INSERT INTO complaints VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+      `INSERT INTO complaints
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
         crypto.randomUUID(),
         order_id || null,
@@ -1245,7 +1519,9 @@ app.get(
             )
           ).rows;
 
-    res.json({ complaints: rows });
+    res.json({
+      complaints: rows,
+    });
   }
 );
 
@@ -1266,7 +1542,8 @@ app.patch(
            updated_at=$3
        WHERE id=$4`,
       [
-        status || "resolved",
+        status ||
+          "resolved",
         response || null,
         new Date().toISOString(),
         req.params.id,
@@ -1302,7 +1579,9 @@ app.get(
       )
     ).rows;
 
-    res.json({ users: rows });
+    res.json({
+      users: rows,
+    });
   }
 );
 
@@ -1324,14 +1603,23 @@ app.get(
           lat,
           lng,
           location_updated_at,
-          (id_card_data IS NOT NULL) AS has_id_card
+          COALESCE(
+            courier_debt,
+            0
+          ) AS courier_debt,
+          (
+            id_card_data
+            IS NOT NULL
+          ) AS has_id_card
          FROM users
          WHERE role='courier'
          ORDER BY created_at DESC`
       )
     ).rows;
 
-    res.json({ couriers: rows });
+    res.json({
+      couriers: rows,
+    });
   }
 );
 
@@ -1353,7 +1641,9 @@ app.get(
       )
     ).rows[0];
 
-    if (!row?.id_card_data) {
+    if (
+      !row?.id_card_data
+    ) {
       return res.status(404).json({
         error:
           "بطاقة التعريف غير موجودة",
@@ -1371,7 +1661,9 @@ app.get(
       "no-store"
     );
 
-    res.send(row.id_card_data);
+    res.send(
+      row.id_card_data
+    );
   }
 );
 
@@ -1381,28 +1673,79 @@ app.patch(
   role("admin"),
   async (req, res) => {
     const approved =
-      req.body.approved ? 1 : 0;
+      req.body.approved
+        ? 1
+        : 0;
 
-    const r = await pool.query(
-      `UPDATE users
-       SET approved=$1
-       WHERE id=$2
-         AND role='courier'`,
-      [
-        approved,
-        req.params.id,
-      ]
-    );
+    const r =
+      await pool.query(
+        `UPDATE users
+         SET approved=$1
+         WHERE id=$2
+           AND role='courier'`,
+        [
+          approved,
+          req.params.id,
+        ]
+      );
 
     if (!r.rowCount) {
       return res.status(404).json({
-        error: "المندوب غير موجود",
+        error:
+          "المندوب غير موجود",
       });
     }
 
     res.json({
       ok: true,
-      approved: !!approved,
+      approved:
+        !!approved,
+    });
+  }
+);
+
+// =====================================================
+// COURIER DEBT - ADMIN
+// =====================================================
+
+/*
+ * تسجيل استلام دين المندوب بالكامل.
+ *
+ * عند الضغط على "تم الاستلام"
+ * يتم تصفير الدين الحالي للمندوب.
+ */
+app.patch(
+  "/api/admin/couriers/:id/debt/paid",
+  auth,
+  role("admin"),
+  async (req, res) => {
+    const result =
+      await pool.query(
+        `UPDATE users
+         SET courier_debt=0
+         WHERE id=$1
+           AND role='courier'
+         RETURNING
+           id,
+           name,
+           COALESCE(
+             courier_debt,
+             0
+           ) AS courier_debt`,
+        [req.params.id]
+      );
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        error:
+          "المندوب غير موجود",
+      });
+    }
+
+    res.json({
+      ok: true,
+      courier:
+        result.rows[0],
     });
   }
 );
@@ -1413,7 +1756,8 @@ app.get(
   role("admin"),
   async (_req, res) => {
     res.json({
-      settings: await getSettings(),
+      settings:
+        await getSettings(),
     });
   }
 );
@@ -1430,18 +1774,27 @@ app.patch(
       >;
 
     const stmt =
-      `INSERT INTO settings(key,value)
-       VALUES($1,$2)
-       ON CONFLICT(key)
-       DO UPDATE SET value=excluded.value`;
+      `INSERT INTO settings(
+        key,
+        value
+      )
+      VALUES($1,$2)
+      ON CONFLICT(key)
+      DO UPDATE
+      SET value=excluded.value`;
 
     for (const [
       k,
       v,
-    ] of Object.entries(updates)) {
+    ] of Object.entries(
+      updates
+    )) {
       await pool.query(
         stmt,
-        [k, String(v)]
+        [
+          k,
+          String(v),
+        ]
       );
     }
 
@@ -1458,72 +1811,91 @@ app.get(
   auth,
   role("admin"),
   async (_req, res) => {
-    const ordersByStatus = (
-      await pool.query(
-        `SELECT status, COUNT(*) c
-         FROM orders
-         GROUP BY status`
-      )
-    ).rows;
+    const ordersByStatus =
+      (
+        await pool.query(
+          `SELECT
+            status,
+            COUNT(*) c
+           FROM orders
+           GROUP BY status`
+        )
+      ).rows;
 
-    const usersByRole = (
-      await pool.query(
-        `SELECT role, COUNT(*) c
-         FROM users
-         GROUP BY role`
-      )
-    ).rows;
+    const usersByRole =
+      (
+        await pool.query(
+          `SELECT
+            role,
+            COUNT(*) c
+           FROM users
+           GROUP BY role`
+        )
+      ).rows;
 
-    const revenue: any = (
-      await pool.query(
-        `SELECT
-          COALESCE(SUM(final_price),0) r
-         FROM orders
-         WHERE status='completed'`
-      )
-    ).rows[0];
+    const revenue: any =
+      (
+        await pool.query(
+          `SELECT
+            COALESCE(
+              SUM(final_price),
+              0
+            ) r
+           FROM orders
+           WHERE status='completed'`
+        )
+      ).rows[0];
 
-    const activeOrders: any = (
-      await pool.query(
-        `SELECT COUNT(*) c
-         FROM orders
-         WHERE status IN
-           ('pending','accepted','picked_up')`
-      )
-    ).rows[0];
+    const activeOrders: any =
+      (
+        await pool.query(
+          `SELECT COUNT(*) c
+           FROM orders
+           WHERE status IN
+             (
+               'pending',
+               'accepted',
+               'picked_up'
+             )`
+        )
+      ).rows[0];
 
-    const couriersOnline: any = (
-      await pool.query(
-        `SELECT COUNT(*) c
-         FROM users
-         WHERE role='courier'
-           AND online=1
-           AND approved=1`
-      )
-    ).rows[0];
+    const couriersOnline: any =
+      (
+        await pool.query(
+          `SELECT COUNT(*) c
+           FROM users
+           WHERE role='courier'
+             AND online=1
+             AND approved=1`
+        )
+      ).rows[0];
 
-    const couriersApproved: any = (
-      await pool.query(
-        `SELECT COUNT(*) c
-         FROM users
-         WHERE role='courier'
-           AND approved=1`
-      )
-    ).rows[0];
+    const couriersApproved: any =
+      (
+        await pool.query(
+          `SELECT COUNT(*) c
+           FROM users
+           WHERE role='courier'
+             AND approved=1`
+        )
+      ).rows[0];
 
-    const couriersPending: any = (
-      await pool.query(
-        `SELECT COUNT(*) c
-         FROM users
-         WHERE role='courier'
-           AND approved=0`
-      )
-    ).rows[0];
+    const couriersPending: any =
+      (
+        await pool.query(
+          `SELECT COUNT(*) c
+           FROM users
+           WHERE role='courier'
+             AND approved=0`
+        )
+      ).rows[0];
 
     res.json({
       ordersByStatus,
       usersByRole,
-      revenue: revenue.r,
+      revenue:
+        revenue.r,
       activeOrders:
         activeOrders.c,
       couriersOnline:
@@ -1540,37 +1912,54 @@ app.get(
 // SERVE FRONTEND
 // =====================================================
 
-const __dirname = path.dirname(
-  fileURLToPath(import.meta.url)
-);
+const __dirname =
+  path.dirname(
+    fileURLToPath(
+      import.meta.url
+    )
+  );
 
-const distPath = path.resolve(
-  __dirname,
-  "..",
-  "dist"
+const distPath =
+  path.resolve(
+    __dirname,
+    "..",
+    "dist"
+  );
+
+app.use(
+  express.static(
+    distPath
+  )
 );
 
 app.use(
-  express.static(distPath)
+  (req, res) => {
+    if (
+      req.path.startsWith(
+        "/api/"
+      )
+    ) {
+      return res
+        .status(404)
+        .json({
+          error:
+            "Not found",
+        });
+    }
+
+    res.sendFile(
+      path.join(
+        distPath,
+        "index.html"
+      )
+    );
+  }
 );
 
-app.use((req, res) => {
-  if (req.path.startsWith("/api/")) {
-    return res.status(404).json({
-      error: "Not found",
-    });
-  }
-
-  res.sendFile(
-    path.join(
-      distPath,
-      "index.html"
-    )
-  );
-});
-
 app.listen(
-  Number(process.env.PORT) || 4000,
+  Number(
+    process.env.PORT
+  ) || 4000,
   "0.0.0.0",
   () =>
     console.log(
