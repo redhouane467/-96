@@ -22,7 +22,7 @@ interface Stats {
   totalRevenue: number;
   appCommission: number;
   courierEarnings: number;
-  debt?: number;
+  debt: number;
 }
 
 const LOCATION_SEND_INTERVAL_MS = 15000;
@@ -37,34 +37,48 @@ export default function CourierDashboard({
   const [orders, setOrders] = useState<Order[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
+
   const [activeTab, setActiveTab] = useState<
     "available" | "my_orders" | "stats"
   >("available");
+
   const [online, setOnline] = useState(false);
   const [approved, setApproved] = useState<boolean | null>(null);
 
   const toast = useToast();
+
   const lastSentRef = useRef(0);
   const stopWatchRef = useRef<(() => void) | null>(null);
 
+  /*
+   * معلومات الحساب والحالة الحالية للمندوب
+   */
   const fetchMe = async () => {
     try {
       const me = await api<{
-        approved: boolean;
-        online: boolean;
+        approved?: boolean | number;
+        online?: boolean | number;
       }>("/auth/me");
 
-      setApproved(me.approved);
-      setOnline(me.online);
+      setApproved(Boolean(me?.approved));
+      setOnline(Boolean(me?.online));
     } catch {
       // non-critical
     }
   };
 
+  /*
+   * الطلبات
+   */
   const fetchOrders = async () => {
     try {
-      const data = await api<{ orders: Order[] }>("/orders");
-      setOrders(data.orders || []);
+      const data = await api<{ orders?: Order[] }>("/orders");
+
+      setOrders(
+        Array.isArray(data?.orders)
+          ? data.orders
+          : []
+      );
     } catch {
       toast("خطأ في تحميل الطلبات", "error");
     } finally {
@@ -72,26 +86,93 @@ export default function CourierDashboard({
     }
   };
 
+  /*
+   * إحصائيات المندوب
+   *
+   * المسار الصحيح:
+   * /courier/stats
+   *
+   * ويتم قبول أكثر من اسم للحقل حتى لا تظهر
+   * الأرقام أصفارًا إذا اختلف اسم الحقل في الـ API.
+   */
   const fetchStats = async () => {
     try {
-      const data = await api<Stats>("/couriers/me/stats");
-      setStats(data);
-    } catch {
-      // Ignore fallback
+      const data = await api<any>("/courier/stats");
+
+      const ordersCount = Number(
+        data?.ordersCount ??
+          data?.completedOrders ??
+          data?.completed_orders ??
+          data?.orders_count ??
+          0
+      );
+
+      const totalRevenue = Number(
+        data?.totalRevenue ??
+          data?.total_revenue ??
+          data?.revenue ??
+          0
+      );
+
+      const appCommission = Number(
+        data?.appCommission ??
+          data?.app_commission ??
+          data?.commission ??
+          0
+      );
+
+      const courierEarnings = Number(
+        data?.courierEarnings ??
+          data?.courier_earnings ??
+          data?.earnings ??
+          data?.profit ??
+          0
+      );
+
+      const debt = Number(
+        data?.debt ??
+          data?.courierDebt ??
+          data?.courier_debt ??
+          0
+      );
+
+      setStats({
+        ordersCount,
+        totalRevenue,
+        appCommission,
+        courierEarnings,
+        debt,
+      });
+    } catch (e) {
+      /*
+       * لا نخفي الخطأ بالكامل.
+       * إذا فشل جلب الإحصائيات تبقى الواجهة تعمل،
+       * لكن نترك القيم الحالية كما هي.
+       */
+      console.error("Courier stats error:", e);
     }
   };
 
+  /*
+   * تحميل البيانات عند فتح لوحة المندوب
+   */
   useEffect(() => {
     fetchMe();
     fetchOrders();
     fetchStats();
   }, []);
 
+  /*
+   * تحديث حالة الاتصال
+   *
+   * المسار الجديد:
+   * /courier/status
+   */
   const toggleOnline = async () => {
     const next = !online;
 
     try {
-      await api("/couriers/me/status", {
+      await api("/courier/status", {
         method: "PATCH",
         body: JSON.stringify({
           online: next,
@@ -101,21 +182,32 @@ export default function CourierDashboard({
       setOnline(next);
 
       toast(
-        next ? "أنت الآن متصل" : "أنت الآن غير متصل",
+        next
+          ? "أنت الآن متصل"
+          : "أنت الآن غير متصل",
         "success"
       );
+
+      /*
+       * تحديث الحالة من الخادم للتأكد
+       */
+      await fetchMe();
     } catch (e) {
       toast(
         e instanceof Error
           ? e.message
-          : "حدث خطأ ما",
+          : "فشل تحديث حالة الاتصال",
         "error"
       );
     }
   };
 
-  // While online, keep sending the courier's live location.
-  // Stops immediately when toggled offline or on unmount.
+  /*
+   * إرسال الموقع أثناء الاتصال
+   *
+   * المسار الجديد:
+   * /courier/location
+   */
   useEffect(() => {
     if (!online) {
       stopWatchRef.current?.();
@@ -136,10 +228,15 @@ export default function CourierDashboard({
 
         lastSentRef.current = now;
 
-        api("/couriers/me/location", {
+        api("/courier/location", {
           method: "PATCH",
           body: JSON.stringify(coords),
-        }).catch(() => {});
+        }).catch((err) => {
+          console.error(
+            "Courier location update failed:",
+            err
+          );
+        });
       },
       (err) => toast(err.message, "error")
     );
@@ -152,6 +249,9 @@ export default function CourierDashboard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [online]);
 
+  /*
+   * إجراءات الطلب
+   */
   const handleAction = async (
     orderId: string,
     action:
@@ -174,6 +274,12 @@ export default function CourierDashboard({
       );
 
       await fetchOrders();
+
+      /*
+       * مهم:
+       * بعد قبول/استلام/توصيل الطلب نعيد جلب
+       * الأرباح والدين مباشرة.
+       */
       await fetchStats();
     } catch (e) {
       toast(
@@ -194,7 +300,7 @@ export default function CourierDashboard({
   );
 
   const currentDebt = Number(
-    stats?.debt || 0
+    stats?.debt ?? 0
   );
 
   return (
@@ -225,6 +331,7 @@ export default function CourierDashboard({
         </div>
       )}
 
+      {/* حالة الاتصال */}
       <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm mb-4">
         <div>
           <p className="font-bold text-gray-800">
@@ -303,9 +410,8 @@ export default function CourierDashboard({
           جاري التحميل...
         </div>
       ) : activeTab === "stats" ? (
-        /* قسم الأرباح والعمولة */
         <div className="space-y-4">
-
+          {/* الأرباح والعمولة */}
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-xl text-center">
               <span className="text-xs text-emerald-700 font-bold block">
@@ -313,7 +419,10 @@ export default function CourierDashboard({
               </span>
 
               <span className="text-2xl font-black text-emerald-700">
-                {stats?.courierEarnings || 0} دج
+                {Number(
+                  stats?.courierEarnings ?? 0
+                ).toFixed(2)}{" "}
+                دج
               </span>
             </div>
 
@@ -323,7 +432,10 @@ export default function CourierDashboard({
               </span>
 
               <span className="text-2xl font-black text-red-700">
-                {stats?.appCommission || 0} دج
+                {Number(
+                  stats?.appCommission ?? 0
+                ).toFixed(2)}{" "}
+                دج
               </span>
             </div>
           </div>
@@ -369,24 +481,29 @@ export default function CourierDashboard({
             </span>
           </div>
 
+          {/* إجمالي الطلبات */}
           <div className="bg-white p-4 rounded-xl shadow-sm text-center border">
             <span className="text-xs text-gray-500 font-bold block">
               إجمالي مبالغ الطلبات المكتملة
             </span>
 
             <span className="text-xl font-bold text-gray-800">
-              {stats?.totalRevenue || 0} دج
+              {Number(
+                stats?.totalRevenue ?? 0
+              ).toFixed(2)}{" "}
+              دج
             </span>
 
             <span className="text-xs text-gray-400 block mt-1">
               عدد الطلبات المسلّمة:{" "}
-              {stats?.ordersCount || 0}
+              {Number(
+                stats?.ordersCount ?? 0
+              )}
             </span>
           </div>
-
         </div>
       ) : (
-        /* قسم الطلبات */
+        /* الطلبات */
         <div className="space-y-3">
           {(activeTab === "available"
             ? availableOrders
@@ -423,7 +540,7 @@ export default function CourierDashboard({
                 </p>
               </div>
 
-              {/* شرح نوع الطلب والملاحظات */}
+              {/* تفاصيل الشحنة */}
               <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 space-y-1">
                 <p className="text-xs text-gray-500 font-bold">
                   📝 وصف الشحنة / تفاصيل الطلب:
