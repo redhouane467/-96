@@ -123,7 +123,7 @@ async function attachCourierInfo(
    OLD DELIVERED ORDERS
    تحويل الطلبات القديمة التي
    بقيت delivered إلى completed
-   وحساب العمولة مرة واحدة
+   وحساب العمولة وحفظها
 ========================= */
 
 async function migrateOldDeliveredOrders() {
@@ -208,11 +208,13 @@ async function migrateOldDeliveredOrders() {
               0
           );
 
+        let commission = 0;
+
         if (
           courierId &&
           finalPrice > 0
         ) {
-          const commission =
+          commission =
             Math.round(
               (
                 (finalPrice *
@@ -248,11 +250,13 @@ async function migrateOldDeliveredOrders() {
             `UPDATE orders
              SET
                status='completed',
-               updated_at=$1
-             WHERE id=$2
+               commission_amount=$1,
+               updated_at=$2
+             WHERE id=$3
                AND status='delivered'
              RETURNING *`,
             [
+              commission,
               now,
               order.id,
             ]
@@ -667,9 +671,9 @@ app.post(
              approved,
              online`,
           [
-  online ? 1 : 0,
-  req.user!.id,
-]
+            online ? 1 : 0,
+            req.user!.id,
+          ]
         );
 
       if (!result.rows.length) {
@@ -1031,6 +1035,7 @@ app.post(
              notes,
              offered_price,
              final_price,
+             commission_amount,
              status,
              confirmation_code,
              created_at,
@@ -1041,6 +1046,7 @@ app.post(
              $1,$2,NULL,$3,$4,
              $5,$6,$7,$8,$9,
              $10,$11,$12,$13,$14,
+             0,
              'pending',NULL,$15,$15
            )
            RETURNING *`,
@@ -1208,6 +1214,7 @@ app.post(
    DELIVER
    التوصيل = إكمال الطلب
    + حساب العمولة مباشرة
+   + حفظ العمولة داخل الطلب
    + إضافة الدين للمندوب
 ========================= */
 
@@ -1285,12 +1292,14 @@ app.post(
           `UPDATE orders
            SET
              status='completed',
-             updated_at=$1
-           WHERE id=$2
-             AND courier_id=$3
+             commission_amount=$1,
+             updated_at=$2
+           WHERE id=$3
+             AND courier_id=$4
              AND status='picked_up'
            RETURNING *`,
           [
+            commission,
             now,
             req.params.id,
             req.user!.id,
@@ -1524,14 +1533,6 @@ app.post(
       const order =
         orderResult.rows[0];
 
-      /*
-       * بعد التعديل الطلب يصبح completed
-       * مباشرة عند ضغط المندوب على تم التوصيل.
-       *
-       * نسمح أيضًا بـ delivered للطلبات
-       * القديمة التي ربما لم تتم هجرتها بعد.
-       */
-
       if (
         order.status !==
           "completed" &&
@@ -1593,16 +1594,6 @@ app.post(
             new Date().toISOString(),
           ]
         );
-
-      /*
-       * مهم:
-       * لا نحسب العمولة هنا.
-       * لا نضيف دينًا هنا.
-       * لا نغير حالة الطلب هنا.
-       *
-       * العمولة والدين تم حسابهما عند
-       * ضغط المندوب على "تم التوصيل".
-       */
 
       return res.json({
         order,
@@ -2068,7 +2059,10 @@ app.get(
                SUM(
                  CASE
                    WHEN status='completed'
-                   THEN final_price
+                   THEN COALESCE(
+                     commission_amount,
+                     0
+                   )
                    ELSE 0
                  END
                ),
