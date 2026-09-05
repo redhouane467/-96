@@ -588,7 +588,7 @@ app.post(
 
       return res.status(500).json({
         error:
-          "حدث خطأ أثناء تسجيل الدخول",
+          "حدث خطأ في الخادم",
       });
     }
   }
@@ -626,7 +626,19 @@ app.get(
       }
 
       return res.json({
-        user: result.rows[0],
+        user: {
+          ...result.rows[0],
+          approved:
+            Number(result.rows[0].approved) ===
+            1,
+          online:
+            Number(result.rows[0].online) ===
+            1,
+          courier_debt:
+            Number(
+              result.rows[0].courier_debt || 0
+            ),
+        },
       });
     } catch (error) {
       console.error(
@@ -652,7 +664,10 @@ app.post(
   role("courier"),
   async (req, res) => {
     try {
-      const { online } = req.body;
+      const requestedOnline =
+        req.body?.online === true ||
+        req.body?.online === 1 ||
+        req.body?.online === "true";
 
       const result =
         await pool.query(
@@ -668,7 +683,7 @@ app.post(
              approved,
              online`,
           [
-            online ? 1 : 0,
+            requestedOnline ? 1 : 0,
             req.user!.id,
           ]
         );
@@ -680,8 +695,20 @@ app.post(
         });
       }
 
+      const user =
+        result.rows[0];
+
       return res.json({
-        user: result.rows[0],
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          role: user.role,
+          approved:
+            Number(user.approved) === 1,
+          online:
+            Number(user.online) === 1,
+        },
       });
     } catch (error) {
       console.error(
