@@ -16,13 +16,13 @@ type Tab =
   | "complaints";
 
 type Stats = {
-  ordersByStatus: { status: string; c: number }[];
-  usersByRole: { role: string; c: number }[];
-  revenue: number;
-  activeOrders: number;
-  couriersOnline: number;
-  couriersApproved: number;
-  couriersPending: number;
+  ordersByStatus?: { status: string; c: number }[] | null;
+  usersByRole?: { role: string; c: number }[] | null;
+  revenue?: number | null;
+  activeOrders?: number | null;
+  couriersOnline?: number | null;
+  couriersApproved?: number | null;
+  couriersPending?: number | null;
 };
 
 type CourierRow = {
@@ -64,49 +64,86 @@ export default function AdminDashboard({
     setLoading(true);
     setError("");
 
-    const fail = (e: unknown) =>
+    const fail = (e: unknown) => {
       setError(e instanceof Error ? e.message : "خطأ");
+    };
 
     const done = () => setLoading(false);
 
     if (tab === "stats") {
       api<Stats>("/admin/stats")
-        .then(setStats)
+        .then((d) => {
+          setStats({
+            ordersByStatus: Array.isArray(d?.ordersByStatus)
+              ? d.ordersByStatus
+              : [],
+            usersByRole: Array.isArray(d?.usersByRole)
+              ? d.usersByRole
+              : [],
+            revenue: Number(d?.revenue ?? 0),
+            activeOrders: Number(d?.activeOrders ?? 0),
+            couriersOnline: Number(d?.couriersOnline ?? 0),
+            couriersApproved: Number(d?.couriersApproved ?? 0),
+            couriersPending: Number(d?.couriersPending ?? 0),
+          });
+        })
         .catch(fail)
         .finally(done);
     }
 
     if (tab === "orders") {
-      api<{ orders: Order[] }>("/orders")
-        .then((d) => setOrders(d.orders))
+      api<{ orders?: Order[] }>("/orders")
+        .then((d) =>
+          setOrders(Array.isArray(d?.orders) ? d.orders : [])
+        )
         .catch(fail)
         .finally(done);
     }
 
     if (tab === "users") {
-      api<{ users: any[] }>("/admin/users")
-        .then((d) => setUsers(d.users))
+      api<{ users?: any[] }>("/admin/users")
+        .then((d) =>
+          setUsers(Array.isArray(d?.users) ? d.users : [])
+        )
         .catch(fail)
         .finally(done);
     }
 
     if (tab === "couriers") {
-      api<{ couriers: CourierRow[] }>("/admin/couriers")
-        .then((d) => setCouriers(d.couriers))
+      api<{ couriers?: CourierRow[] }>("/admin/couriers")
+        .then((d) =>
+          setCouriers(
+            Array.isArray(d?.couriers) ? d.couriers : []
+          )
+        )
         .catch(fail)
         .finally(done);
     }
 
     if (tab === "settings") {
-      api<{ settings: Record<string, number> }>("/admin/settings")
-        .then((d) => setSettings(d.settings))
+      api<{ settings?: Record<string, number> }>(
+        "/admin/settings"
+      )
+        .then((d) =>
+          setSettings(
+            d?.settings && typeof d.settings === "object"
+              ? d.settings
+              : {}
+          )
+        )
         .catch(fail)
         .finally(done);
     }
 
     if (tab === "complaints") {
-      api<{ complaints: Complaint[] }>("/complaints")
-        .then((d) => setComplaints(d.complaints))
+      api<{ complaints?: Complaint[] }>("/complaints")
+        .then((d) =>
+          setComplaints(
+            Array.isArray(d?.complaints)
+              ? d.complaints
+              : []
+          )
+        )
         .catch(fail)
         .finally(done);
     }
@@ -151,11 +188,15 @@ export default function AdminDashboard({
         }),
       });
 
-      const d = await api<{ complaints: Complaint[] }>(
+      const d = await api<{ complaints?: Complaint[] }>(
         "/complaints"
       );
 
-      setComplaints(d.complaints);
+      setComplaints(
+        Array.isArray(d?.complaints)
+          ? d.complaints
+          : []
+      );
 
       toast("تم إرسال الرد", "success");
     } catch (err) {
@@ -176,11 +217,15 @@ export default function AdminDashboard({
         body: JSON.stringify({ approved }),
       });
 
-      const d = await api<{ couriers: CourierRow[] }>(
+      const d = await api<{ couriers?: CourierRow[] }>(
         "/admin/couriers"
       );
 
-      setCouriers(d.couriers);
+      setCouriers(
+        Array.isArray(d?.couriers)
+          ? d.couriers
+          : []
+      );
 
       toast(
         approved
@@ -203,7 +248,10 @@ export default function AdminDashboard({
     const debt = Number(courier?.courier_debt || 0);
 
     if (debt <= 0) {
-      toast("لا يوجد دين مستحق على هذا المندوب", "success");
+      toast(
+        "لا يوجد دين مستحق على هذا المندوب",
+        "success"
+      );
       return;
     }
 
@@ -228,16 +276,23 @@ export default function AdminDashboard({
           c.id === id
             ? {
                 ...c,
-                courier_debt: d.courier_debt,
+                courier_debt: Number(
+                  d?.courier_debt ?? 0
+                ),
               }
             : c
         )
       );
 
-      toast("تم تسجيل استلام الدين وتصفيره", "success");
+      toast(
+        "تم تسجيل استلام الدين وتصفيره",
+        "success"
+      );
     } catch (err) {
       toast(
-        err instanceof Error ? err.message : "تعذر تحديث الدين",
+        err instanceof Error
+          ? err.message
+          : "تعذر تحديث الدين",
         "error"
       );
     } finally {
@@ -249,7 +304,8 @@ export default function AdminDashboard({
     setIdCardLoading(true);
 
     try {
-      const token = localStorage.getItem("wassli_token");
+      const token =
+        localStorage.getItem("wassli_token");
 
       const response = await fetch(
         `/api/admin/couriers/${id}/id-card`,
@@ -263,7 +319,8 @@ export default function AdminDashboard({
       );
 
       if (!response.ok) {
-        let message = "تعذر تحميل بطاقة التعريف";
+        let message =
+          "تعذر تحميل بطاقة التعريف";
 
         try {
           const data = await response.json();
@@ -355,32 +412,42 @@ export default function AdminDashboard({
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <StatCard
                 label="طلبات نشطة"
-                value={stats.activeOrders}
+                value={Number(
+                  stats.activeOrders ?? 0
+                )}
               />
 
               <StatCard
                 label="مندوبون متصلون"
-                value={stats.couriersOnline}
+                value={Number(
+                  stats.couriersOnline ?? 0
+                )}
               />
 
               <StatCard
                 label="مندوبون معتمدون"
-                value={stats.couriersApproved}
+                value={Number(
+                  stats.couriersApproved ?? 0
+                )}
               />
 
               <StatCard
                 label="بانتظار الاعتماد"
-                value={stats.couriersPending}
+                value={Number(
+                  stats.couriersPending ?? 0
+                )}
                 accent="amber"
               />
 
-              {stats.ordersByStatus.map((s) => (
-                <StatCard
-                  key={s.status}
-                  label={s.status}
-                  value={s.c}
-                />
-              ))}
+              {(stats.ordersByStatus ?? []).map(
+                (s) => (
+                  <StatCard
+                    key={s.status}
+                    label={s.status}
+                    value={Number(s.c ?? 0)}
+                  />
+                )
+              )}
 
               <div className="bg-white rounded-2xl p-4 shadow-sm col-span-2">
                 <div className="text-slate-500 text-sm">
@@ -388,7 +455,10 @@ export default function AdminDashboard({
                 </div>
 
                 <div className="text-2xl font-black text-green-700">
-                  {stats.revenue} دج
+                  {Number(
+                    stats.revenue ?? 0
+                  )}{" "}
+                  دج
                 </div>
               </div>
             </div>
@@ -405,7 +475,9 @@ export default function AdminDashboard({
           ) : (
             <div className="space-y-3">
               {couriers.map((c) => {
-                const debt = Number(c.courier_debt || 0);
+                const debt = Number(
+                  c.courier_debt || 0
+                );
 
                 return (
                   <div
@@ -429,24 +501,24 @@ export default function AdminDashboard({
                       <div className="flex flex-col items-end gap-1 shrink-0">
                         <span
                           className={`text-xs rounded-full px-2 py-1 font-bold ${
-                            c.approved
+                            Boolean(c.approved)
                               ? "bg-green-100 text-green-700"
                               : "bg-amber-100 text-amber-800"
                           }`}
                         >
-                          {c.approved
+                          {Boolean(c.approved)
                             ? "معتمد"
                             : "بانتظار الاعتماد"}
                         </span>
 
                         <span
                           className={`text-xs rounded-full px-2 py-1 ${
-                            c.online
+                            Boolean(c.online)
                               ? "bg-blue-100 text-blue-700"
                               : "bg-slate-100 text-slate-500"
                           }`}
                         >
-                          {c.online
+                          {Boolean(c.online)
                             ? "متصل"
                             : "غير متصل"}
                         </span>
@@ -536,12 +608,12 @@ export default function AdminDashboard({
                           )
                         }
                         className={`w-full rounded-xl py-2 font-bold text-sm ${
-                          c.approved
+                          Boolean(c.approved)
                             ? "bg-red-50 text-red-700"
                             : "bg-green-600 text-white"
                         }`}
                       >
-                        {c.approved
+                        {Boolean(c.approved)
                           ? "إلغاء الاعتماد"
                           : "اعتماد المندوب"}
                       </button>
@@ -622,27 +694,29 @@ export default function AdminDashboard({
               onSubmit={saveSettings}
               className="bg-white rounded-2xl p-5 shadow-sm space-y-3"
             >
-              {Object.entries(settings).map(([k, v]) => (
-                <div key={k}>
-                  <label className="block text-sm text-slate-600 mb-1">
-                    {k}
-                  </label>
+              {Object.entries(settings).map(
+                ([k, v]) => (
+                  <div key={k}>
+                    <label className="block text-sm text-slate-600 mb-1">
+                      {k}
+                    </label>
 
-                  <input
-                    className="w-full border rounded-xl p-3"
-                    type="number"
-                    value={v}
-                    onChange={(e) =>
-                      setSettings({
-                        ...settings,
-                        [k]: Number(
-                          e.target.value
-                        ),
-                      })
-                    }
-                  />
-                </div>
-              ))}
+                    <input
+                      className="w-full border rounded-xl p-3"
+                      type="number"
+                      value={v}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          [k]: Number(
+                            e.target.value
+                          ),
+                        })
+                      }
+                    />
+                  </div>
+                )
+              )}
 
               <button className="bg-green-600 text-white rounded-xl px-5 py-3 font-bold">
                 حفظ
