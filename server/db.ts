@@ -82,10 +82,6 @@ async function init() {
     );
   `);
 
-  /*
-   * جعل البريد الإلكتروني اختياريًا لأن تسجيل الدخول
-   * والتسجيل أصبحا بواسطة رقم الهاتف.
-   */
   await pool.query(
     "ALTER TABLE users ALTER COLUMN email DROP NOT NULL"
   );
@@ -95,12 +91,10 @@ async function init() {
     column: string
   ): Promise<boolean> {
     const result = await pool.query(
-      `
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_name = $1
-        AND column_name = $2
-      `,
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_name = $1
+         AND column_name = $2`,
       [table, column]
     );
 
@@ -119,9 +113,6 @@ async function init() {
     }
   }
 
-  /*
-   * أعمدة المستخدمين
-   */
   await addColumnIfMissing(
     "users",
     "online",
@@ -170,9 +161,6 @@ async function init() {
     "REAL NOT NULL DEFAULT 0"
   );
 
-  /*
-   * أعمدة الطلبات
-   */
   await addColumnIfMissing(
     "orders",
     "pickup_lat",
@@ -188,12 +176,6 @@ async function init() {
   await addColumnIfMissing(
     "orders",
     "delivery_lat",
-    "REAL"
-  );
-
-  await addColumnIfMissing(
-    "orders",
-    "delivery_lng",
     "REAL"
   );
 
@@ -215,9 +197,6 @@ async function init() {
     "TEXT"
   );
 
-  /*
-   * الإعدادات الافتراضية
-   */
   await pool.query(`
     INSERT INTO settings(key, value)
     VALUES('base_price', '150')
@@ -248,10 +227,6 @@ async function init() {
     ON CONFLICT(key) DO NOTHING
   `);
 
-  /*
-   * العملاء والأدمن يعتمدون تلقائيًا.
-   * المندوب يبقى بحاجة إلى اعتماد الأدمن.
-   */
   await pool.query(`
     UPDATE users
     SET approved = 1
@@ -260,78 +235,70 @@ async function init() {
   `);
 
   /*
-   * حساب ديون المندوبين للطلبات المكتملة الموجودة
-   * قبل إضافة نظام الديون.
+   * تهيئة ديون المندوبين مرة واحدة فقط.
    *
-   * يتم تنفيذ هذه العملية مرة واحدة فقط.
+   * نحسب العمولة المستحقة للتطبيق من الطلبات
+   * التي أصبحت مكتملة قبل إضافة نظام الديون.
    */
-  const debtMigration = await pool.query(
-    `
-    SELECT value
-    FROM settings
-    WHERE key = 'courier_debt_initialized_v1'
-    `
+  const debtMarker = await pool.query(
+    `SELECT value
+     FROM settings
+     WHERE key = 'courier_debt_initialized_v1'`
   );
 
-  if (debtMigration.rows.length === 0) {
-    const commissionSetting = await pool.query(
-      `
-      SELECT value
-      FROM settings
-      WHERE key = 'commission_percent'
-      `
+  if (debtMarker.rows.length === 0) {
+    const commissionResult = await pool.query(
+      `SELECT value
+       FROM settings
+       WHERE key = 'commission_percent'`
     );
 
     const commissionPercent = Number(
-      commissionSetting.rows[0]?.value || 20
+      commissionResult.rows[0]?.value ?? 20
     );
 
-    const completedOrders = await pool.query(`
-      SELECT
-        courier_id,
-        COALESCE(SUM(final_price), 0) AS total
-      FROM orders
-      WHERE status = 'completed'
-        AND courier_id IS NOT NULL
-      GROUP BY courier_id
-    `);
+    const completedOrders = await pool.query(
+      `SELECT courier_id, final_price
+       FROM orders
+       WHERE status = 'completed'
+         AND courier_id IS NOT NULL
+         AND final_price IS NOT NULL`
+    );
 
-    for (const row of completedOrders.rows) {
-      const total = Number(row.total || 0);
+    for (const order of completedOrders.rows) {
+      const courierId = String(order.courier_id);
+      const finalPrice = Number(order.final_price);
 
-      const debt =
-        total * (commissionPercent / 100);
+      if (!Number.isFinite(finalPrice) || finalPrice <= 0) {
+        continue;
+      }
+
+      const commission =
+        Math.round(
+          (finalPrice * commissionPercent) / 100 * 100
+        ) / 100;
+
+      if (commission <= 0) {
+        continue;
+      }
 
       await pool.query(
-        `
-        UPDATE users
-        SET courier_debt = $1
-        WHERE id = $2
-          AND role = 'courier'
-        `,
-        [debt, row.courier_id]
+        `UPDATE users
+         SET courier_debt = COALESCE(courier_debt, 0) + $1
+         WHERE id = $2
+           AND role = 'courier'`,
+        [commission, courierId]
       );
     }
 
     await pool.query(
-      `
-      INSERT INTO settings(
-        key,
-        value
-      )
-      VALUES(
-        'courier_debt_initialized_v1',
-        '1'
-      )
-      ON CONFLICT(key) DO NOTHING
-      `
+      `INSERT INTO settings(key, value)
+       VALUES('courier_debt_initialized_v1', '1')
+       ON CONFLICT(key) DO NOTHING`
     );
   }
 }
 
 init().catch((error) => {
-  console.error(
-    "Database initialization error:",
-    error
-  );
+  console.error("Database initialization error:", error);
 });
