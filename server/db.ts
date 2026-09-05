@@ -22,7 +22,8 @@ async function init() {
       lng REAL,
       location_updated_at TEXT,
       id_card_data BYTEA,
-      id_card_mime TEXT
+      id_card_mime TEXT,
+      courier_debt REAL NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS orders(
@@ -81,7 +82,10 @@ async function init() {
     );
   `);
 
-  // البريد الإلكتروني أصبح اختياريًا.
+  /*
+   * جعل البريد الإلكتروني اختياريًا لأن تسجيل الدخول
+   * والتسجيل أصبحا بواسطة رقم الهاتف.
+   */
   await pool.query(
     "ALTER TABLE users ALTER COLUMN email DROP NOT NULL"
   );
@@ -91,10 +95,12 @@ async function init() {
     column: string
   ): Promise<boolean> {
     const result = await pool.query(
-      `SELECT column_name
-       FROM information_schema.columns
-       WHERE table_name = $1
-         AND column_name = $2`,
+      `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = $1
+        AND column_name = $2
+      `,
       [table, column]
     );
 
@@ -113,7 +119,9 @@ async function init() {
     }
   }
 
-  // أعمدة users القديمة والجديدة.
+  /*
+   * أعمدة المستخدمين
+   */
   await addColumnIfMissing(
     "users",
     "online",
@@ -126,8 +134,17 @@ async function init() {
     "INTEGER NOT NULL DEFAULT 0"
   );
 
-  await addColumnIfMissing("users", "lat", "REAL");
-  await addColumnIfMissing("users", "lng", "REAL");
+  await addColumnIfMissing(
+    "users",
+    "lat",
+    "REAL"
+  );
+
+  await addColumnIfMissing(
+    "users",
+    "lng",
+    "REAL"
+  );
 
   await addColumnIfMissing(
     "users",
@@ -147,7 +164,15 @@ async function init() {
     "TEXT"
   );
 
-  // أعمدة orders القديمة والجديدة.
+  await addColumnIfMissing(
+    "users",
+    "courier_debt",
+    "REAL NOT NULL DEFAULT 0"
+  );
+
+  /*
+   * أعمدة الطلبات
+   */
   await addColumnIfMissing(
     "orders",
     "pickup_lat",
@@ -190,11 +215,9 @@ async function init() {
     "TEXT"
   );
 
-  // لا ننشئ unique index على الهاتف هنا حتى لا يفشل
-  // تشغيل التطبيق إذا كانت قاعدة البيانات القديمة تحتوي
-  // على أرقام مكررة.
-  // التسجيل الجديد يتحقق من عدم تكرار رقم الهاتف.
-
+  /*
+   * الإعدادات الافتراضية
+   */
   await pool.query(`
     INSERT INTO settings(key, value)
     VALUES('base_price', '150')
@@ -225,16 +248,90 @@ async function init() {
     ON CONFLICT(key) DO NOTHING
   `);
 
-  // العميل والمدير معتمدان تلقائيًا.
-  // المندوب يبقى بانتظار موافقة المدير.
+  /*
+   * العملاء والأدمن يعتمدون تلقائيًا.
+   * المندوب يبقى بحاجة إلى اعتماد الأدمن.
+   */
   await pool.query(`
     UPDATE users
     SET approved = 1
     WHERE role IN ('customer', 'admin')
       AND approved = 0
   `);
+
+  /*
+   * حساب ديون المندوبين للطلبات المكتملة الموجودة
+   * قبل إضافة نظام الديون.
+   *
+   * يتم تنفيذ هذه العملية مرة واحدة فقط.
+   */
+  const debtMigration = await pool.query(
+    `
+    SELECT value
+    FROM settings
+    WHERE key = 'courier_debt_initialized_v1'
+    `
+  );
+
+  if (debtMigration.rows.length === 0) {
+    const commissionSetting = await pool.query(
+      `
+      SELECT value
+      FROM settings
+      WHERE key = 'commission_percent'
+      `
+    );
+
+    const commissionPercent = Number(
+      commissionSetting.rows[0]?.value || 20
+    );
+
+    const completedOrders = await pool.query(`
+      SELECT
+        courier_id,
+        COALESCE(SUM(final_price), 0) AS total
+      FROM orders
+      WHERE status = 'completed'
+        AND courier_id IS NOT NULL
+      GROUP BY courier_id
+    `);
+
+    for (const row of completedOrders.rows) {
+      const total = Number(row.total || 0);
+
+      const debt =
+        total * (commissionPercent / 100);
+
+      await pool.query(
+        `
+        UPDATE users
+        SET courier_debt = $1
+        WHERE id = $2
+          AND role = 'courier'
+        `,
+        [debt, row.courier_id]
+      );
+    }
+
+    await pool.query(
+      `
+      INSERT INTO settings(
+        key,
+        value
+      )
+      VALUES(
+        'courier_debt_initialized_v1',
+        '1'
+      )
+      ON CONFLICT(key) DO NOTHING
+      `
+    );
+  }
 }
 
 init().catch((error) => {
-  console.error("Database initialization error:", error);
+  console.error(
+    "Database initialization error:",
+    error
+  );
 });
