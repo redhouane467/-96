@@ -18,10 +18,9 @@ interface Order {
 }
 
 interface Stats {
-  ordersCount: number;
-  totalRevenue: number;
-  appCommission: number;
-  courierEarnings: number;
+  completed: number;
+  active: number;
+  earnings: number;
   debt: number;
 }
 
@@ -37,7 +36,6 @@ export default function CourierDashboard({
   const [orders, setOrders] = useState<Order[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
-
   const [activeTab, setActiveTab] = useState<
     "available" | "my_orders" | "stats"
   >("available");
@@ -46,36 +44,48 @@ export default function CourierDashboard({
   const [approved, setApproved] = useState<boolean | null>(null);
 
   const toast = useToast();
-
   const lastSentRef = useRef(0);
   const stopWatchRef = useRef<(() => void) | null>(null);
 
-  /*
-   * معلومات الحساب والحالة الحالية للمندوب
-   */
   const fetchMe = async () => {
     try {
-      const me = await api<{
-        approved?: boolean | number;
-        online?: boolean | number;
+      const response = await api<{
+        user: {
+          id: string;
+          name: string;
+          email?: string | null;
+          phone?: string | null;
+          role: string;
+          approved: boolean | number;
+          online: boolean | number;
+          courier_debt?: number | string;
+        };
       }>("/auth/me");
 
-      setApproved(Boolean(me?.approved));
-      setOnline(Boolean(me?.online));
+      const me = response.user;
+
+      if (!me) return;
+
+      setApproved(
+        me.approved === true || Number(me.approved) === 1
+      );
+
+      setOnline(
+        me.online === true || Number(me.online) === 1
+      );
     } catch {
-      // non-critical
+      // تجاهل فشل تحديث بيانات المندوب
     }
   };
 
-  /*
-   * الطلبات
-   */
   const fetchOrders = async () => {
     try {
-      const data = await api<{ orders?: Order[] }>("/orders");
+      const data = await api<{
+        orders?: Order[];
+      }>("/orders");
 
       setOrders(
-        Array.isArray(data?.orders)
+        Array.isArray(data.orders)
           ? data.orders
           : []
       );
@@ -86,94 +96,70 @@ export default function CourierDashboard({
     }
   };
 
-  /*
-   * إحصائيات المندوب
-   *
-   * المسار الصحيح:
-   * /courier/stats
-   *
-   * ويتم قبول أكثر من اسم للحقل حتى لا تظهر
-   * الأرقام أصفارًا إذا اختلف اسم الحقل في الـ API.
-   */
   const fetchStats = async () => {
     try {
-      const data = await api<any>("/courier/stats");
+      const response = await api<{
+        stats?: {
+          completed?: number | string;
+          active?: number | string;
+          earnings?: number | string;
+          debt?: number | string;
+        };
+      }>("/courier/stats");
 
-      const ordersCount = Number(
-        data?.ordersCount ??
-          data?.completedOrders ??
-          data?.completed_orders ??
-          data?.orders_count ??
-          0
-      );
+      const s = response.stats;
 
-      const totalRevenue = Number(
-        data?.totalRevenue ??
-          data?.total_revenue ??
-          data?.revenue ??
-          0
-      );
-
-      const appCommission = Number(
-        data?.appCommission ??
-          data?.app_commission ??
-          data?.commission ??
-          0
-      );
-
-      const courierEarnings = Number(
-        data?.courierEarnings ??
-          data?.courier_earnings ??
-          data?.earnings ??
-          data?.profit ??
-          0
-      );
-
-      const debt = Number(
-        data?.debt ??
-          data?.courierDebt ??
-          data?.courier_debt ??
-          0
-      );
+      if (!s) {
+        setStats({
+          completed: 0,
+          active: 0,
+          earnings: 0,
+          debt: 0,
+        });
+        return;
+      }
 
       setStats({
-        ordersCount,
-        totalRevenue,
-        appCommission,
-        courierEarnings,
-        debt,
+        completed: Number(s.completed ?? 0),
+        active: Number(s.active ?? 0),
+        earnings: Number(s.earnings ?? 0),
+        debt: Number(s.debt ?? 0),
       });
-    } catch (e) {
-      /*
-       * لا نخفي الخطأ بالكامل.
-       * إذا فشل جلب الإحصائيات تبقى الواجهة تعمل،
-       * لكن نترك القيم الحالية كما هي.
-       */
-      console.error("Courier stats error:", e);
+    } catch {
+      setStats({
+        completed: 0,
+        active: 0,
+        earnings: 0,
+        debt: 0,
+      });
     }
   };
 
-  /*
-   * تحميل البيانات عند فتح لوحة المندوب
-   */
   useEffect(() => {
     fetchMe();
     fetchOrders();
     fetchStats();
   }, []);
 
-  /*
-   * تحديث حالة الاتصال
-   *
-   * المسار الجديد:
-   * /courier/status
-   */
   const toggleOnline = async () => {
     const next = !online;
 
+    if (!approved) {
+      toast(
+        "حساب المندوب غير معتمد من الإدارة",
+        "error"
+      );
+      return;
+    }
+
     try {
-      await api("/courier/status", {
-        method: "PATCH",
+      const response = await api<{
+        user?: {
+          approved: boolean | number;
+          online: boolean | number;
+        };
+      }>("/courier/online", {
+        method: "POST",
         body: JSON.stringify({
           online: next,
         }),
@@ -181,33 +167,34 @@ export default function CourierDashboard({
 
       setOnline(next);
 
+      if (response.user) {
+        setApproved(
+          response.user.approved === true ||
+            Number(response.user.approved) === 1
+        );
+
+        setOnline(
+          response.user.online === true ||
+            Number(response.user.online) === 1
+        );
+      }
+
       toast(
         next
           ? "أنت الآن متصل"
           : "أنت الآن غير متصل",
         "success"
       );
-
-      /*
-       * تحديث الحالة من الخادم للتأكد
-       */
-      await fetchMe();
     } catch (e) {
       toast(
         e instanceof Error
           ? e.message
-          : "فشل تحديث حالة الاتصال",
+          : "حدث خطأ أثناء تغيير حالة الاتصال",
         "error"
       );
     }
   };
 
-  /*
-   * إرسال الموقع أثناء الاتصال
-   *
-   * المسار الجديد:
-   * /courier/location
-   */
   useEffect(() => {
     if (!online) {
       stopWatchRef.current?.();
@@ -229,16 +216,13 @@ export default function CourierDashboard({
         lastSentRef.current = now;
 
         api("/courier/location", {
-          method: "PATCH",
+          method: "POST",
           body: JSON.stringify(coords),
-        }).catch((err) => {
-          console.error(
-            "Courier location update failed:",
-            err
-          );
-        });
+        }).catch(() => {});
       },
-      (err) => toast(err.message, "error")
+      (err) => {
+        toast(err.message, "error");
+      }
     );
 
     return () => {
@@ -249,9 +233,6 @@ export default function CourierDashboard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [online]);
 
-  /*
-   * إجراءات الطلب
-   */
   const handleAction = async (
     orderId: string,
     action:
@@ -274,13 +255,8 @@ export default function CourierDashboard({
       );
 
       await fetchOrders();
-
-      /*
-       * مهم:
-       * بعد قبول/استلام/توصيل الطلب نعيد جلب
-       * الأرباح والدين مباشرة.
-       */
       await fetchStats();
+      await fetchMe();
     } catch (e) {
       toast(
         e instanceof Error
@@ -303,9 +279,23 @@ export default function CourierDashboard({
     stats?.debt ?? 0
   );
 
+  const totalRevenue = Number(
+    stats?.earnings ?? 0
+  );
+
+  const appCommission =
+    Math.round(
+      totalRevenue * 0.2 * 100
+    ) / 100;
+
+  const courierEarnings =
+    Math.round(
+      totalRevenue * 0.8 * 100
+    ) / 100;
+
   return (
     <div className="min-h-screen bg-gray-50 dir-rtl p-4 font-sans">
-      {/* Header */}
+
       <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm mb-4">
         <div>
           <h1 className="text-xl font-bold text-gray-800">
@@ -331,7 +321,12 @@ export default function CourierDashboard({
         </div>
       )}
 
-      {/* حالة الاتصال */}
+      {approved === true && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl p-3 mb-4 text-center text-sm font-bold">
+          ✅ حسابك معتمد من الإدارة
+        </div>
+      )}
+
       <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm mb-4">
         <div>
           <p className="font-bold text-gray-800">
@@ -347,21 +342,19 @@ export default function CourierDashboard({
 
         <button
           onClick={toggleOnline}
-          disabled={approved === false}
+          disabled={approved !== true}
           className={`px-5 py-2 rounded-full font-bold text-sm transition disabled:opacity-40 ${
             online
               ? "bg-emerald-600 text-white"
               : "bg-gray-200 text-gray-600"
           }`}
         >
-          {online
-            ? "متصل ●"
-            : "غير متصل"}
+          {online ? "متصل ●" : "غير متصل"}
         </button>
       </div>
 
-      {/* Tabs */}
       <div className="flex gap-2 mb-4 bg-gray-200 p-1 rounded-xl">
+
         <button
           onClick={() =>
             setActiveTab("available")
@@ -402,45 +395,41 @@ export default function CourierDashboard({
         >
           الأرباح والعمولة 💰
         </button>
+
       </div>
 
-      {/* Content */}
       {loading ? (
         <div className="text-center py-10 text-gray-500">
           جاري التحميل...
         </div>
       ) : activeTab === "stats" ? (
+
         <div className="space-y-4">
-          {/* الأرباح والعمولة */}
+
           <div className="grid grid-cols-2 gap-3">
+
             <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-xl text-center">
               <span className="text-xs text-emerald-700 font-bold block">
                 صافي أرباحك (80%)
               </span>
 
               <span className="text-2xl font-black text-emerald-700">
-                {Number(
-                  stats?.courierEarnings ?? 0
-                ).toFixed(2)}{" "}
-                دج
+                {courierEarnings.toFixed(2)} دج
               </span>
             </div>
 
             <div className="bg-red-50 border border-red-200 p-4 rounded-xl text-center">
               <span className="text-xs text-red-700 font-bold block">
-                مستحقات التطبيق (20%)
+                عمولة التطبيق (20%)
               </span>
 
               <span className="text-2xl font-black text-red-700">
-                {Number(
-                  stats?.appCommission ?? 0
-                ).toFixed(2)}{" "}
-                دج
+                {appCommission.toFixed(2)} دج
               </span>
             </div>
+
           </div>
 
-          {/* الدين الحالي */}
           <div
             className={`p-5 rounded-xl shadow-sm border text-center ${
               currentDebt > 0
@@ -455,7 +444,7 @@ export default function CourierDashboard({
                   : "text-emerald-700"
               }`}
             >
-              💳 الدين الحالي المستحق للتطبيق
+              💳 المبلغ الواجب دفعه للتطبيق
             </span>
 
             <span
@@ -476,44 +465,46 @@ export default function CourierDashboard({
               }`}
             >
               {currentDebt > 0
-                ? "هذا المبلغ هو العمولة غير المسددة حالياً"
-                : "لا توجد عليك ديون مستحقة حالياً"}
+                ? "هذا هو إجمالي العمولة المستحقة عليك للتطبيق"
+                : "لا يوجد مبلغ مستحق عليك حالياً"}
             </span>
           </div>
 
-          {/* إجمالي الطلبات */}
           <div className="bg-white p-4 rounded-xl shadow-sm text-center border">
+
             <span className="text-xs text-gray-500 font-bold block">
               إجمالي مبالغ الطلبات المكتملة
             </span>
 
             <span className="text-xl font-bold text-gray-800">
-              {Number(
-                stats?.totalRevenue ?? 0
-              ).toFixed(2)}{" "}
-              دج
+              {totalRevenue.toFixed(2)} دج
             </span>
 
             <span className="text-xs text-gray-400 block mt-1">
-              عدد الطلبات المسلّمة:{" "}
-              {Number(
-                stats?.ordersCount ?? 0
-              )}
+              عدد الطلبات المكتملة:{" "}
+              {stats?.completed ?? 0}
             </span>
+
           </div>
+
         </div>
+
       ) : (
-        /* الطلبات */
+
         <div className="space-y-3">
+
           {(activeTab === "available"
             ? availableOrders
             : myOrders
           ).map((order) => (
+
             <div
               key={order.id}
               className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 space-y-3"
             >
+
               <div className="flex justify-between items-start">
+
                 <span className="text-xs font-bold text-gray-400">
                   مسافة {order.distance_km} كم
                 </span>
@@ -521,10 +512,11 @@ export default function CourierDashboard({
                 <span className="bg-emerald-100 text-emerald-800 font-black px-3 py-1 rounded-full text-sm">
                   {order.final_price} دج
                 </span>
+
               </div>
 
-              {/* تفاصيل المكان */}
               <div className="text-sm space-y-1">
+
                 <p>
                   <span className="font-bold text-gray-500">
                     📍 من:
@@ -538,10 +530,11 @@ export default function CourierDashboard({
                   </span>{" "}
                   {order.delivery_address}
                 </p>
+
               </div>
 
-              {/* تفاصيل الشحنة */}
               <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 space-y-1">
+
                 <p className="text-xs text-gray-500 font-bold">
                   📝 وصف الشحنة / تفاصيل الطلب:
                 </p>
@@ -553,7 +546,8 @@ export default function CourierDashboard({
 
                 {order.notes && (
                   <p className="text-xs text-amber-700 mt-1 font-medium">
-                    ⚠️ ملاحظات: {order.notes}
+                    ⚠️ ملاحظات:{" "}
+                    {order.notes}
                   </p>
                 )}
 
@@ -563,10 +557,11 @@ export default function CourierDashboard({
                     {order.recipient_phone}
                   </p>
                 )}
+
               </div>
 
-              {/* أزرار الإجراءات */}
               <div className="pt-2 flex gap-2">
+
                 {order.status === "pending" && (
                   <button
                     onClick={() =>
@@ -575,7 +570,9 @@ export default function CourierDashboard({
                         "accept"
                       )
                     }
-                    disabled={approved === false}
+                    disabled={
+                      approved !== true
+                    }
                     className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-emerald-700 disabled:opacity-40"
                   >
                     قبول الطلب
@@ -624,16 +621,27 @@ export default function CourierDashboard({
                   </button>
                 )}
 
+                {order.status === "completed" && (
+                  <span className="w-full text-center text-xs font-bold text-emerald-600 bg-emerald-50 py-2 rounded-lg">
+                    ✅ تم التسليم بنجاح
+                  </span>
+                )}
+
                 {order.status === "delivered" && (
                   <span className="w-full text-center text-xs font-bold text-emerald-600 bg-emerald-50 py-2 rounded-lg">
                     ✅ تم التسليم بنجاح
                   </span>
                 )}
+
               </div>
+
             </div>
+
           ))}
+
         </div>
       )}
+
     </div>
   );
 }
