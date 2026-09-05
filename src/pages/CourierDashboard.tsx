@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import type { User } from "../types";
 import { api } from "../lib/api";
-import { watchPosition } from "../lib/geolocation";
 import { useToast } from "../lib/toast";
 
 interface Order {
@@ -76,19 +75,23 @@ export default function CourierDashboard({
   const [online, setOnline] = useState(false);
   const [approved, setApproved] = useState<boolean | null>(null);
 
-  const [changingOnline, setChangingOnline] =
-    useState(false);
+  const [changingOnline, setChangingOnline] = useState(false);
+
+  const [locationStatus, setLocationStatus] = useState<
+    "idle" | "loading" | "success" | "error"
+  >("idle");
+
+  const [locationMessage, setLocationMessage] = useState("");
 
   const toast = useToast();
 
   const lastSentRef = useRef(0);
   const stopWatchRef = useRef<(() => void) | null>(null);
+  const watchIdRef = useRef<number | null>(null);
 
   const fetchMe = async () => {
     try {
-      const response = await api<MeResponse>(
-        "/auth/me"
-      );
+      const response = await api<MeResponse>("/auth/me");
 
       const me = response.user;
 
@@ -96,20 +99,11 @@ export default function CourierDashboard({
         return;
       }
 
-      const serverApproved = toBoolean(
-        me.approved
-      );
-
-      const serverOnline = toBoolean(
-        me.online
-      );
+      const serverApproved = toBoolean(me.approved);
+      const serverOnline = toBoolean(me.online);
 
       setApproved(serverApproved);
-      setOnline(serverOnline);
-
-      if (!serverApproved && serverOnline) {
-        setOnline(false);
-      }
+      setOnline(serverApproved ? serverOnline : false);
     } catch {
       // تجاهل فشل تحديث بيانات المندوب
     }
@@ -127,10 +121,7 @@ export default function CourierDashboard({
           : []
       );
     } catch {
-      toast(
-        "خطأ في تحميل الطلبات",
-        "error"
-      );
+      toast("خطأ في تحميل الطلبات", "error");
     } finally {
       setLoading(false);
     }
@@ -156,23 +147,14 @@ export default function CourierDashboard({
           earnings: 0,
           debt: 0,
         });
-
         return;
       }
 
       setStats({
-        completed: Number(
-          s.completed ?? 0
-        ),
-        active: Number(
-          s.active ?? 0
-        ),
-        earnings: Number(
-          s.earnings ?? 0
-        ),
-        debt: Number(
-          s.debt ?? 0
-        ),
+        completed: Number(s.completed ?? 0),
+        active: Number(s.active ?? 0),
+        earnings: Number(s.earnings ?? 0),
+        debt: Number(s.debt ?? 0),
       });
     } catch {
       setStats({
@@ -196,6 +178,188 @@ export default function CourierDashboard({
       order.status === "picked_up"
   );
 
+  const sendLocation = async (
+    latitude: number,
+    longitude: number,
+    showSuccess = true
+  ) => {
+    try {
+      await api("/courier/location", {
+        method: "POST",
+        body: JSON.stringify({
+          lat: latitude,
+          lng: longitude,
+        }),
+      });
+
+      if (showSuccess) {
+        setLocationStatus("success");
+        setLocationMessage("تم تحديد موقعك وإرساله بنجاح");
+      }
+
+      return true;
+    } catch (e) {
+      setLocationStatus("error");
+      setLocationMessage(
+        e instanceof Error
+          ? e.message
+          : "تعذر إرسال موقعك"
+      );
+
+      return false;
+    }
+  };
+
+  const locateMe = () => {
+    if (!approved) {
+      toast(
+        "حسابك غير معتمد من الإدارة",
+        "error"
+      );
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setLocationStatus("error");
+      setLocationMessage(
+        "هذا الهاتف أو المتصفح لا يدعم تحديد الموقع"
+      );
+      return;
+    }
+
+    setLocationStatus("loading");
+    setLocationMessage("جاري تحديد موقعك…");
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const latitude = position.coords.latitude;
+        const longitude = position.coords.longitude;
+
+        await sendLocation(
+          latitude,
+          longitude,
+          true
+        );
+      },
+      (error) => {
+        let message =
+          "تعذر تحديد موقعك";
+
+        if (error.code === 1) {
+          message =
+            "تم رفض إذن الموقع. فعّل الموقع من إعدادات الهاتف ثم حاول مرة أخرى.";
+        } else if (error.code === 2) {
+          message =
+            "تعذر الحصول على موقعك. تأكد من تشغيل GPS والإنترنت.";
+        } else if (error.code === 3) {
+          message =
+            "انتهت مهلة تحديد الموقع. حاول مرة أخرى.";
+        }
+
+        setLocationStatus("error");
+        setLocationMessage(message);
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 20000,
+      }
+    );
+  };
+
+  const stopLocationWatch = () => {
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(
+        watchIdRef.current
+      );
+      watchIdRef.current = null;
+    }
+
+    stopWatchRef.current?.();
+    stopWatchRef.current = null;
+  };
+
+  const startLocationWatch = () => {
+    if (!navigator.geolocation) {
+      setLocationStatus("error");
+      setLocationMessage(
+        "هذا الهاتف أو المتصفح لا يدعم تحديد الموقع"
+      );
+      return;
+    }
+
+    stopLocationWatch();
+
+    lastSentRef.current = 0;
+
+    setLocationStatus("loading");
+    setLocationMessage(
+      "جاري تشغيل التتبع وتحديد موقعك…"
+    );
+
+    const watchId =
+      navigator.geolocation.watchPosition(
+        async (position) => {
+          const latitude =
+            position.coords.latitude;
+
+          const longitude =
+            position.coords.longitude;
+
+          const now = Date.now();
+
+          if (
+            now -
+              lastSentRef.current <
+            LOCATION_SEND_INTERVAL_MS
+          ) {
+            return;
+          }
+
+          lastSentRef.current = now;
+
+          const success =
+            await sendLocation(
+              latitude,
+              longitude,
+              false
+            );
+
+          if (success) {
+            setLocationStatus("success");
+            setLocationMessage(
+              "📍 موقعك محدّث الآن"
+            );
+          }
+        },
+        (error) => {
+          let message =
+            "تعذر تحديد موقعك";
+
+          if (error.code === 1) {
+            message =
+              "تم رفض إذن الموقع. فعّل إذن الموقع للتطبيق ثم حاول مرة أخرى.";
+          } else if (error.code === 2) {
+            message =
+              "تعذر الحصول على موقعك. تأكد من تشغيل GPS.";
+          } else if (error.code === 3) {
+            message =
+              "انتهت مهلة تحديد الموقع. حاول مرة أخرى.";
+          }
+
+          setLocationStatus("error");
+          setLocationMessage(message);
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 5000,
+          timeout: 20000,
+        }
+      );
+
+    watchIdRef.current = watchId;
+  };
+
   const toggleOnline = async () => {
     if (changingOnline) {
       return;
@@ -206,7 +370,6 @@ export default function CourierDashboard({
         "حساب المندوب غير معتمد من الإدارة",
         "error"
       );
-
       return;
     }
 
@@ -215,7 +378,6 @@ export default function CourierDashboard({
         "لا يمكنك إيقاف الاتصال أثناء وجود طلب قيد التوصيل",
         "error"
       );
-
       return;
     }
 
@@ -254,9 +416,7 @@ export default function CourierDashboard({
           serverUser.online
         );
 
-      setApproved(
-        serverApproved
-      );
+      setApproved(serverApproved);
 
       setOnline(
         serverApproved
@@ -269,16 +429,27 @@ export default function CourierDashboard({
           "حساب المندوب غير معتمد من الإدارة",
           "error"
         );
-
         return;
       }
 
-      toast(
-        serverOnline
-          ? "أنت الآن متصل"
-          : "أنت الآن غير متصل",
-        "success"
-      );
+      if (serverOnline) {
+        toast(
+          "أنت الآن متصل",
+          "success"
+        );
+
+        locateMe();
+      } else {
+        stopLocationWatch();
+
+        setLocationStatus("idle");
+        setLocationMessage("");
+
+        toast(
+          "أنت الآن غير متصل",
+          "success"
+        );
+      }
     } catch (e) {
       toast(
         e instanceof Error
@@ -295,56 +466,24 @@ export default function CourierDashboard({
 
   useEffect(() => {
     if (
-      !online ||
-      approved !== true ||
-      !hasActiveOrder
+      online &&
+      approved === true &&
+      hasActiveOrder
     ) {
-      stopWatchRef.current?.();
-      stopWatchRef.current = null;
-      return;
+      startLocationWatch();
+    } else {
+      stopLocationWatch();
+
+      if (!hasActiveOrder && online) {
+        setLocationStatus("idle");
+        setLocationMessage(
+          "حدد موقعك عند بدء توصيل طلب"
+        );
+      }
     }
 
-    lastSentRef.current = 0;
-
-    stopWatchRef.current =
-      watchPosition(
-        (coords) => {
-          const now =
-            Date.now();
-
-          if (
-            now -
-              lastSentRef.current <
-            LOCATION_SEND_INTERVAL_MS
-          ) {
-            return;
-          }
-
-          lastSentRef.current =
-            now;
-
-          api(
-            "/courier/location",
-            {
-              method: "POST",
-              body: JSON.stringify(
-                coords
-              ),
-            }
-          ).catch(() => {});
-        },
-        (err) => {
-          toast(
-            err.message,
-            "error"
-          );
-        }
-      );
-
     return () => {
-      stopWatchRef.current?.();
-      stopWatchRef.current =
-        null;
+      stopLocationWatch();
     };
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -366,7 +505,6 @@ export default function CourierDashboard({
         "حساب المندوب غير معتمد من الإدارة",
         "error"
       );
-
       return;
     }
 
@@ -378,23 +516,17 @@ export default function CourierDashboard({
         }
       );
 
-      if (
-        action === "deliver"
-      ) {
+      if (action === "deliver") {
         toast(
           "تم التوصيل للزبون وتسجيل الطلب كمكتمل",
           "success"
         );
-      } else if (
-        action === "accept"
-      ) {
+      } else if (action === "accept") {
         toast(
           "تم قبول الطلب بنجاح",
           "success"
         );
-      } else if (
-        action === "pickup"
-      ) {
+      } else if (action === "pickup") {
         toast(
           "تم تسجيل استلام الشحنة",
           "success"
@@ -432,27 +564,19 @@ export default function CourierDashboard({
     );
 
   const currentDebt =
-    Number(
-      stats?.debt ?? 0
-    );
+    Number(stats?.debt ?? 0);
 
   const totalRevenue =
-    Number(
-      stats?.earnings ?? 0
-    );
+    Number(stats?.earnings ?? 0);
 
   const appCommission =
     Math.round(
-      totalRevenue *
-        0.2 *
-        100
+      totalRevenue * 0.2 * 100
     ) / 100;
 
   const courierEarnings =
     Math.round(
-      totalRevenue *
-        0.8 *
-        100
+      totalRevenue * 0.8 * 100
     ) / 100;
 
   return (
@@ -492,41 +616,95 @@ export default function CourierDashboard({
         </div>
       )}
 
-      <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm mb-4">
+      <div className="bg-white p-4 rounded-xl shadow-sm mb-4">
 
-        <div>
-          <p className="font-bold text-gray-800">
-            حالتك
-          </p>
+        <div className="flex items-center justify-between">
 
-          <p className="text-sm text-gray-500">
-            {online
-              ? "متصل — تظهر لك الطلبات القريبة"
-              : "غير متصل"}
-          </p>
+          <div>
+            <p className="font-bold text-gray-800">
+              حالتك
+            </p>
+
+            <p className="text-sm text-gray-500">
+              {online
+                ? "متصل — تظهر لك الطلبات القريبة"
+                : "غير متصل"}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={toggleOnline}
+            disabled={
+              approved !== true ||
+              changingOnline ||
+              (online && hasActiveOrder)
+            }
+            className={`px-5 py-2 rounded-full font-bold text-sm transition disabled:opacity-40 ${
+              online
+                ? "bg-emerald-600 text-white"
+                : "bg-gray-200 text-gray-600"
+            }`}
+          >
+            {changingOnline
+              ? "جاري التغيير..."
+              : online
+                ? "متصل ●"
+                : "غير متصل"}
+          </button>
+
         </div>
 
-        <button
-          onClick={
-            toggleOnline
-          }
-          disabled={
-            approved !== true ||
-            changingOnline ||
-            (online && hasActiveOrder)
-          }
-          className={`px-5 py-2 rounded-full font-bold text-sm transition disabled:opacity-40 ${
-            online
-              ? "bg-emerald-600 text-white"
-              : "bg-gray-200 text-gray-600"
-          }`}
-        >
-          {changingOnline
-            ? "جاري التغيير..."
-            : online
-              ? "متصل ●"
-              : "غير متصل"}
-        </button>
+        {approved === true && (
+          <div className="mt-4 border-t pt-4">
+
+            <button
+              type="button"
+              onClick={locateMe}
+              disabled={
+                locationStatus ===
+                "loading"
+              }
+              className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold text-sm disabled:opacity-50"
+            >
+              {locationStatus ===
+              "loading"
+                ? "📡 جاري تحديد موقعي..."
+                : "📍 تحديد موقعي"}
+            </button>
+
+            {locationMessage && (
+              <div
+                className={`mt-3 rounded-lg p-3 text-center text-sm font-bold ${
+                  locationStatus ===
+                  "success"
+                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                    : locationStatus ===
+                        "error"
+                      ? "bg-red-50 text-red-700 border border-red-200"
+                      : "bg-blue-50 text-blue-700 border border-blue-200"
+                }`}
+              >
+                {locationMessage}
+              </div>
+            )}
+
+            {online &&
+              !hasActiveOrder && (
+                <p className="text-xs text-gray-500 text-center mt-2">
+                  سيستمر تحديث موقعك تلقائيًا عند قبول طلب والبدء في توصيله.
+                </p>
+              )}
+
+            {online &&
+              hasActiveOrder && (
+                <p className="text-xs text-emerald-600 text-center mt-2 font-bold">
+                  📡 التتبع المباشر للموقع مفعل أثناء الطلب.
+                </p>
+              )}
+
+          </div>
+        )}
 
       </div>
 
@@ -534,51 +712,38 @@ export default function CourierDashboard({
 
         <button
           onClick={() =>
-            setActiveTab(
-              "available"
-            )
+            setActiveTab("available")
           }
           className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${
-            activeTab ===
-            "available"
+            activeTab === "available"
               ? "bg-white text-emerald-600 shadow-sm"
               : "text-gray-600"
           }`}
         >
           الطلبات المتاحة (
-          {
-            availableOrders.length
-          })
+          {availableOrders.length})
         </button>
 
         <button
           onClick={() =>
-            setActiveTab(
-              "my_orders"
-            )
+            setActiveTab("my_orders")
           }
           className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${
-            activeTab ===
-            "my_orders"
+            activeTab === "my_orders"
               ? "bg-white text-emerald-600 shadow-sm"
               : "text-gray-600"
           }`}
         >
           طلباتي الحالية (
-          {
-            myOrders.length
-          })
+          {myOrders.length})
         </button>
 
         <button
           onClick={() =>
-            setActiveTab(
-              "stats"
-            )
+            setActiveTab("stats")
           }
           className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${
-            activeTab ===
-            "stats"
+            activeTab === "stats"
               ? "bg-white text-emerald-600 shadow-sm"
               : "text-gray-600"
           }`}
@@ -592,41 +757,30 @@ export default function CourierDashboard({
         <div className="text-center py-10 text-gray-500">
           جاري التحميل...
         </div>
-      ) : activeTab ===
-        "stats" ? (
+      ) : activeTab === "stats" ? (
 
         <div className="space-y-4">
 
           <div className="grid grid-cols-2 gap-3">
 
             <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-xl text-center">
-
               <span className="text-xs text-emerald-700 font-bold block">
                 صافي أرباحك (80%)
               </span>
 
               <span className="text-2xl font-black text-emerald-700">
-                {courierEarnings.toFixed(
-                  2
-                )}{" "}
-                دج
+                {courierEarnings.toFixed(2)} دج
               </span>
-
             </div>
 
             <div className="bg-red-50 border border-red-200 p-4 rounded-xl text-center">
-
               <span className="text-xs text-red-700 font-bold block">
                 عمولة التطبيق (20%)
               </span>
 
               <span className="text-2xl font-black text-red-700">
-                {appCommission.toFixed(
-                  2
-                )}{" "}
-                دج
+                {appCommission.toFixed(2)} دج
               </span>
-
             </div>
 
           </div>
@@ -638,7 +792,6 @@ export default function CourierDashboard({
                 : "bg-emerald-50 border-emerald-300"
             }`}
           >
-
             <span
               className={`text-sm font-bold block ${
                 currentDebt > 0
@@ -656,10 +809,7 @@ export default function CourierDashboard({
                   : "text-emerald-700"
               }`}
             >
-              {currentDebt.toFixed(
-                2
-              )}{" "}
-              دج
+              {currentDebt.toFixed(2)} دج
             </span>
 
             <span
@@ -673,7 +823,6 @@ export default function CourierDashboard({
                 ? "هذا هو إجمالي العمولة المستحقة عليك للتطبيق"
                 : "لا يوجد مبلغ مستحق عليك حالياً"}
             </span>
-
           </div>
 
           <div className="bg-white p-4 rounded-xl shadow-sm text-center border">
@@ -683,18 +832,12 @@ export default function CourierDashboard({
             </span>
 
             <span className="text-xl font-bold text-gray-800">
-              {totalRevenue.toFixed(
-                2
-              )}{" "}
-              دج
+              {totalRevenue.toFixed(2)} دج
             </span>
 
             <span className="text-xs text-gray-400 block mt-1">
               عدد الطلبات المكتملة:{" "}
-              {
-                stats?.completed ??
-                0
-              }
+              {stats?.completed ?? 0}
             </span>
 
           </div>
@@ -705,201 +848,162 @@ export default function CourierDashboard({
 
         <div className="space-y-3">
 
-          {(activeTab ===
-          "available"
+          {(activeTab === "available"
             ? availableOrders
             : myOrders
           ).length === 0 ? (
 
             <div className="bg-white rounded-xl p-8 text-center text-gray-500 border">
-              {activeTab ===
-              "available"
+              {activeTab === "available"
                 ? "لا توجد طلبات متاحة حالياً"
                 : "لا توجد لديك طلبات حالية"}
             </div>
 
           ) : (
 
-            (activeTab ===
-            "available"
+            (activeTab === "available"
               ? availableOrders
               : myOrders
-            ).map(
-              (order) => (
+            ).map((order) => (
 
-                <div
-                  key={order.id}
-                  className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 space-y-3"
-                >
+              <div
+                key={order.id}
+                className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 space-y-3"
+              >
 
-                  <div className="flex justify-between items-start">
+                <div className="flex justify-between items-start">
 
-                    <span className="text-xs font-bold text-gray-400">
-                      مسافة{" "}
-                      {
-                        order.distance_km
-                      }{" "}
-                      كم
-                    </span>
+                  <span className="text-xs font-bold text-gray-400">
+                    مسافة {order.distance_km} كم
+                  </span>
 
-                    <span className="bg-emerald-100 text-emerald-800 font-black px-3 py-1 rounded-full text-sm">
-                      {
-                        order.final_price
-                      }{" "}
-                      دج
-                    </span>
-
-                  </div>
-
-                  <div className="text-sm space-y-1">
-
-                    <p>
-                      <span className="font-bold text-gray-500">
-                        📍 من:
-                      </span>{" "}
-                      {
-                        order.pickup_address
-                      }
-                    </p>
-
-                    <p>
-                      <span className="font-bold text-gray-500">
-                        🏁 إلى:
-                      </span>{" "}
-                      {
-                        order.delivery_address
-                      }
-                    </p>
-
-                  </div>
-
-                  <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 space-y-1">
-
-                    <p className="text-xs text-gray-500 font-bold">
-                      📝 وصف الشحنة / تفاصيل الطلب:
-                    </p>
-
-                    <p className="text-sm font-semibold text-gray-800">
-                      {
-                        order.package_description ||
-                        "لا يوجد وصف محدد"
-                      }
-                    </p>
-
-                    {order.notes && (
-                      <p className="text-xs text-amber-700 mt-1 font-medium">
-                        ⚠️ ملاحظات:{" "}
-                        {
-                          order.notes
-                        }
-                      </p>
-                    )}
-
-                    {order.recipient_phone && (
-                      <p className="text-xs text-blue-600 font-medium">
-                        📞 هاتف المستلم:{" "}
-                        {
-                          order.recipient_phone
-                        }
-                      </p>
-                    )}
-
-                  </div>
-
-                  <div className="pt-2 flex gap-2">
-
-                    {order.status ===
-                      "pending" && (
-
-                      <button
-                        onClick={() =>
-                          handleAction(
-                            order.id,
-                            "accept"
-                          )
-                        }
-                        disabled={
-                          approved !==
-                            true ||
-                          changingOnline
-                        }
-                        className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-emerald-700 disabled:opacity-40"
-                      >
-                        قبول الطلب
-                      </button>
-
-                    )}
-
-                    {order.status ===
-                      "accepted" && (
-
-                      <>
-                        <button
-                          onClick={() =>
-                            handleAction(
-                              order.id,
-                              "pickup"
-                            )
-                          }
-                          className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-bold text-sm"
-                        >
-                          تم استلام الشحنة
-                        </button>
-
-                        <button
-                          onClick={() =>
-                            handleAction(
-                              order.id,
-                              "unassign"
-                            )
-                          }
-                          className="bg-red-50 text-red-600 px-3 py-2 rounded-lg font-bold text-sm border border-red-200"
-                        >
-                          إلغاء التكليف
-                        </button>
-                      </>
-
-                    )}
-
-                    {order.status ===
-                      "picked_up" && (
-
-                      <button
-                        onClick={() =>
-                          handleAction(
-                            order.id,
-                            "deliver"
-                          )
-                        }
-                        className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm"
-                      >
-                        تم التوصيل للزبون
-                      </button>
-
-                    )}
-
-                    {(order.status ===
-                      "completed" ||
-                      order.status ===
-                        "delivered") && (
-
-                      <span className="w-full text-center text-xs font-bold text-emerald-600 bg-emerald-50 py-2 rounded-lg">
-                        ✅ تم التسليم بنجاح
-                      </span>
-
-                    )}
-
-                  </div>
+                  <span className="bg-emerald-100 text-emerald-800 font-black px-3 py-1 rounded-full text-sm">
+                    {order.final_price} دج
+                  </span>
 
                 </div>
 
-              )
-            )
+                <div className="text-sm space-y-1">
+
+                  <p>
+                    <span className="font-bold text-gray-500">
+                      📍 من:
+                    </span>{" "}
+                    {order.pickup_address}
+                  </p>
+
+                  <p>
+                    <span className="font-bold text-gray-500">
+                      🏁 إلى:
+                    </span>{" "}
+                    {order.delivery_address}
+                  </p>
+
+                </div>
+
+                <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 space-y-1">
+
+                  <p className="text-xs text-gray-500 font-bold">
+                    📝 وصف الشحنة / تفاصيل الطلب:
+                  </p>
+
+                  <p className="text-sm font-semibold text-gray-800">
+                    {order.package_description ||
+                      "لا يوجد وصف محدد"}
+                  </p>
+
+                  {order.notes && (
+                    <p className="text-xs text-amber-700 mt-1 font-medium">
+                      ⚠️ ملاحظات: {order.notes}
+                    </p>
+                  )}
+
+                  {order.recipient_phone && (
+                    <p className="text-xs text-blue-600 font-medium">
+                      📞 هاتف المستلم:{" "}
+                      {order.recipient_phone}
+                    </p>
+                  )}
+
+                </div>
+
+                <div className="pt-2 flex gap-2">
+
+                  {order.status === "pending" && (
+                    <button
+                      onClick={() =>
+                        handleAction(
+                          order.id,
+                          "accept"
+                        )
+                      }
+                      disabled={
+                        approved !== true ||
+                        changingOnline
+                      }
+                      className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-emerald-700 disabled:opacity-40"
+                    >
+                      قبول الطلب
+                    </button>
+                  )}
+
+                  {order.status === "accepted" && (
+                    <>
+                      <button
+                        onClick={() =>
+                          handleAction(
+                            order.id,
+                            "pickup"
+                          )
+                        }
+                        className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-bold text-sm"
+                      >
+                        تم استلام الشحنة
+                      </button>
+
+                      <button
+                        onClick={() =>
+                          handleAction(
+                            order.id,
+                            "unassign"
+                          )
+                        }
+                        className="bg-red-50 text-red-600 px-3 py-2 rounded-lg font-bold text-sm border border-red-200"
+                      >
+                        إلغاء التكليف
+                      </button>
+                    </>
+                  )}
+
+                  {order.status === "picked_up" && (
+                    <button
+                      onClick={() =>
+                        handleAction(
+                          order.id,
+                          "deliver"
+                        )
+                      }
+                      className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm"
+                    >
+                      تم التوصيل للزبون
+                    </button>
+                  )}
+
+                  {(order.status === "completed" ||
+                    order.status === "delivered") && (
+                    <span className="w-full text-center text-xs font-bold text-emerald-600 bg-emerald-50 py-2 rounded-lg">
+                      ✅ تم التسليم بنجاح
+                    </span>
+                  )}
+
+                </div>
+
+              </div>
+            ))
 
           )}
 
         </div>
-
       )}
 
     </div>
