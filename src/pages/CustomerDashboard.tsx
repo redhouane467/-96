@@ -109,9 +109,6 @@ export default function CustomerDashboard({
     stars: number
   ) {
     try {
-      /*
-       * الخادم يستخدم /rating
-       */
       await api(
         `/orders/${id}/rating`,
         {
@@ -362,12 +359,20 @@ function NewOrderForm({
       return;
     }
 
+    if (window.isSecureContext === false) {
+      toast(
+        "تحديد الموقع يحتاج إلى اتصال آمن HTTPS",
+        "error"
+      );
+      return;
+    }
+
     setLocating(true);
 
     const options: PositionOptions = {
-      enableHighAccuracy: false,
-      timeout: 15000,
-      maximumAge: 30000,
+      enableHighAccuracy: true,
+      timeout: 20000,
+      maximumAge: 0,
     };
 
     navigator.geolocation.getCurrentPosition(
@@ -378,8 +383,30 @@ function NewOrderForm({
         const lng =
           position.coords.longitude;
 
-        setPickup({ lat, lng });
-        setMapCenter([lat, lng]);
+        if (
+          !Number.isFinite(lat) ||
+          !Number.isFinite(lng)
+        ) {
+          setLocating(false);
+
+          toast(
+            "تم الحصول على موقع غير صالح",
+            "error"
+          );
+
+          return;
+        }
+
+        setPickup({
+          lat,
+          lng,
+        });
+
+        setMapCenter([
+          lat,
+          lng,
+        ]);
+
         setPickingMode("delivery");
         setLocating(false);
 
@@ -396,8 +423,32 @@ function NewOrderForm({
 
         setLocating(false);
 
+        if (error.code === 1) {
+          toast(
+            "تم رفض إذن تحديد الموقع. اسمح للموقع من إعدادات المتصفح ثم حاول مرة أخرى.",
+            "error"
+          );
+          return;
+        }
+
+        if (error.code === 2) {
+          toast(
+            "تعذر تحديد موقعك. تأكد من تشغيل خدمة الموقع GPS ثم حاول مرة أخرى.",
+            "error"
+          );
+          return;
+        }
+
+        if (error.code === 3) {
+          toast(
+            "انتهى وقت تحديد الموقع. تأكد من تشغيل GPS وحاول مرة أخرى.",
+            "error"
+          );
+          return;
+        }
+
         toast(
-          "تعذر التقاط الموقع تلقائياً. يمكنك الضغط مباشرة على الخريطة لتحديده.",
+          "تعذر تحديد موقعك تلقائيًا. يمكنك تحديد نقطة الاستلام مباشرة على الخريطة.",
           "error"
         );
       },
@@ -437,6 +488,18 @@ function NewOrderForm({
       return;
     }
 
+    if (
+      distanceKm == null ||
+      !Number.isFinite(distanceKm) ||
+      distanceKm <= 0
+    ) {
+      toast(
+        "تعذر حساب المسافة بين نقطتي الاستلام والتسليم. حددهما من جديد على الخريطة.",
+        "error"
+      );
+      return;
+    }
+
     setSubmitting(true);
 
     try {
@@ -444,10 +507,10 @@ function NewOrderForm({
         method: "POST",
         body: JSON.stringify({
           pickup_address:
-            pickupAddress,
+            pickupAddress.trim(),
 
           delivery_address:
-            deliveryAddress,
+            deliveryAddress.trim(),
 
           pickup_lat:
             pickup.lat,
@@ -461,18 +524,26 @@ function NewOrderForm({
           delivery_lng:
             delivery.lng,
 
+          /*
+           * مهم:
+           * السيرفر يحتاج هذه القيمة لحساب
+           * السعر والتحقق من صحة الطلب.
+           */
+          distance_km:
+            distanceKm,
+
           package_description:
-            orderDescription,
+            orderDescription.trim(),
 
           recipient_phone:
-            recipientPhone || null,
+            recipientPhone.trim() || null,
 
           notes:
             notes.trim() || null,
 
           offered_price:
             suggest
-              ? price
+              ? Number(price)
               : null,
         }),
       });
@@ -531,10 +602,10 @@ function NewOrderForm({
             type="button"
             onClick={useMyLocation}
             disabled={locating}
-            className="text-xs text-green-700 font-bold shrink-0"
+            className="text-xs text-green-700 font-bold shrink-0 disabled:opacity-50"
           >
             {locating
-              ? "..."
+              ? "جاري تحديد الموقع..."
               : "📍 موقعي الحالي"}
           </button>
         </div>
