@@ -667,9 +667,9 @@ app.post(
              approved,
              online`,
           [
-            Boolean(online),
-            req.user!.id,
-          ]
+  online ? 1 : 0,
+  req.user!.id,
+]
         );
 
       if (!result.rows.length) {
