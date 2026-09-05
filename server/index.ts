@@ -1,56 +1,73 @@
 import express from "express";
-import cors from "cors";
+import path from "path";
+import crypto from "crypto";
+import { pool } from "./db";
+import {
+  auth,
+  role,
+  sign,
+} from "./auth";
 import bcrypt from "bcryptjs";
-import crypto from "node:crypto";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { pool } from "./db.js";
-import { auth, role, sign } from "./auth.js";
-import { haversineKm, round1 } from "./geo.js";
 
 const app = express();
 
-app.use(cors());
-app.use(express.json({ limit: "8mb" }));
+app.use(
+  express.json({
+    limit: "8mb",
+  })
+);
+
+function id() {
+  return crypto.randomUUID();
+}
 
 async function getSettings() {
   const result = await pool.query(
-    "SELECT key,value FROM settings"
+    "SELECT key, value FROM settings"
   );
 
-  const rows = result.rows as any[];
+  const settings: Record<string, string> = {};
 
-  return Object.fromEntries(
-    rows.map((r) => [r.key, Number(r.value)])
-  );
+  for (const row of result.rows) {
+    settings[row.key] = row.value;
+  }
+
+  return settings;
 }
 
 async function calcPrice(
-  distanceKm: number,
-  offeredPrice?: number | null
+  distanceKm: number
 ) {
-  if (
-    offeredPrice !== null &&
-    offeredPrice !== undefined
-  ) {
-    return Number(offeredPrice);
-  }
+  const settings = await getSettings();
 
-  const s = await getSettings();
+  const basePrice =
+    Number(settings.base_price ?? 150);
+
+  const baseDistance =
+    Number(settings.base_distance_km ?? 2);
+
+  const extraKmPrice =
+    Number(settings.extra_km_price ?? 50);
+
+  const extraDistance = Math.max(
+    0,
+    Math.ceil(distanceKm - baseDistance)
+  );
 
   return (
-    s.base_price +
-    Math.max(
-      0,
-      distanceKm - s.base_distance_km
-    ) * s.extra_km_price
+    basePrice +
+    extraDistance * extraKmPrice
   );
 }
 
-function sanitizeForCourier(rows: any[]) {
-  return rows.map(
-    ({ confirmation_code, ...rest }) => rest
-  );
+function sanitizeForCourier(
+  order: any
+) {
+  const copy = { ...order };
+
+  delete copy.confirmation_code;
+
+  return copy;
 }
 
 async function recordStatus(
@@ -58,9 +75,11 @@ async function recordStatus(
   status: string
 ) {
   await pool.query(
-    "INSERT INTO order_status_history VALUES($1,$2,$3,$4)",
+    `INSERT INTO order_status_history
+     (id, order_id, status, created_at)
+     VALUES ($1,$2,$3,$4)`,
     [
-      crypto.randomUUID(),
+      id(),
       orderId,
       status,
       new Date().toISOString(),
@@ -68,738 +87,648 @@ async function recordStatus(
   );
 }
 
-async function attachCourierInfo(order: any) {
+async function attachCourierInfo(
+  order: any
+) {
   if (!order.courier_id) {
     return order;
   }
 
-  const c: any = (
-    await pool.query(
-      `SELECT
-        name,
-        phone,
-        online,
-        lat,
-        lng,
-        location_updated_at
-       FROM users
-       WHERE id=$1`,
-      [order.courier_id]
-    )
-  ).rows[0];
+  const result = await pool.query(
+    `SELECT
+       id,
+       name,
+       phone,
+       online,
+       lat,
+       lng,
+       location_updated_at
+     FROM users
+     WHERE id=$1
+       AND role='courier'`,
+    [order.courier_id]
+  );
 
-  if (!c) {
+  if (!result.rows.length) {
     return order;
   }
 
   return {
     ...order,
-    courier: {
-      name: c.name,
-      phone: c.phone,
-      online: !!c.online,
-      lat: c.lat,
-      lng: c.lng,
-      location_updated_at:
-        c.location_updated_at,
-    },
+    courier: result.rows[0],
   };
 }
 
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true });
-});
+/* =========================
+   AUTH
+========================= */
 
-// =====================================================
-// AUTH
-// =====================================================
-
-app.post("/api/auth/register", async (req, res) => {
-  const {
-    name,
-    password,
-    phone,
-    role: r = "customer",
-    idCard,
-  } = req.body;
-
-  const normalizedPhone = String(
-    phone || ""
-  ).trim();
-
-  if (
-    !name ||
-    !normalizedPhone ||
-    !password ||
-    password.length < 6
-  ) {
-    return res.status(400).json({
-      error:
-        "تحقق من الاسم ورقم الهاتف وكلمة المرور",
-    });
-  }
-
-  if (
-    !["customer", "courier"].includes(r)
-  ) {
-    return res.status(400).json({
-      error: "الدور غير صالح",
-    });
-  }
-
-  let idCardBuffer: Buffer | null = null;
-  let idCardMime: string | null = null;
-
-  if (r === "courier") {
-    if (
-      !idCard?.data ||
-      !idCard?.mime
-    ) {
-      return res.status(400).json({
-        error:
-          "بطاقة التعريف مطلوبة للمندوب",
-      });
-    }
-
-    const allowedMime = [
-      "image/jpeg",
-      "image/png",
-      "image/webp",
-    ];
-
-    if (
-      !allowedMime.includes(idCard.mime)
-    ) {
-      return res.status(400).json({
-        error:
-          "صيغة بطاقة التعريف غير مدعومة",
-      });
-    }
-
+app.post(
+  "/api/auth/register",
+  async (req, res) => {
     try {
-      idCardBuffer = Buffer.from(
-        idCard.data,
-        "base64"
-      );
-    } catch {
-      return res.status(400).json({
-        error:
-          "ملف بطاقة التعريف غير صالح",
-      });
-    }
-
-    if (
-      idCardBuffer.length >
-      4 * 1024 * 1024
-    ) {
-      return res.status(400).json({
-        error:
-          "حجم بطاقة التعريف يجب ألا يتجاوز 4MB",
-      });
-    }
-
-    idCardMime = idCard.mime;
-  }
-
-  try {
-    const existing = (
-      await pool.query(
-        "SELECT id FROM users WHERE phone=$1",
-        [normalizedPhone]
-      )
-    ).rows[0];
-
-    if (existing) {
-      return res.status(409).json({
-        error:
-          "رقم الهاتف مستخدم بالفعل",
-      });
-    }
-
-    const id = crypto.randomUUID();
-
-    const approved =
-      r === "customer" ? 1 : 0;
-
-    await pool.query(
-      `INSERT INTO users(
-        id,
+      const {
         name,
-        email,
         phone,
-        password_hash,
-        role,
-        created_at,
-        online,
-        approved,
-        id_card_data,
-        id_card_mime,
-        courier_debt
-      )
-      VALUES(
-        $1,
-        $2,
-        NULL,
-        $3,
-        $4,
-        $5,
-        $6,
-        0,
-        $7,
-        $8,
-        $9,
-        0
-      )`,
-      [
-        id,
-        String(name).trim(),
-        normalizedPhone,
-        bcrypt.hashSync(
+        password,
+        role: requestedRole,
+        idCard,
+      } = req.body;
+
+      if (
+        !name ||
+        !phone ||
+        !password ||
+        !requestedRole
+      ) {
+        return res.status(400).json({
+          error:
+            "الاسم ورقم الهاتف وكلمة المرور مطلوبة",
+        });
+      }
+
+      if (
+        !["customer", "courier"].includes(
+          requestedRole
+        )
+      ) {
+        return res.status(400).json({
+          error: "نوع الحساب غير صالح",
+        });
+      }
+
+      const normalizedPhone =
+        String(phone).trim();
+
+      if (password.length < 6) {
+        return res.status(400).json({
+          error:
+            "كلمة المرور يجب أن تكون 6 أحرف على الأقل",
+        });
+      }
+
+      if (
+        requestedRole === "courier" &&
+        (!idCard ||
+          !idCard.data ||
+          !idCard.mime)
+      ) {
+        return res.status(400).json({
+          error:
+            "بطاقة التعريف مطلوبة للمندوب",
+        });
+      }
+
+      const existing =
+        await pool.query(
+          `SELECT id
+           FROM users
+           WHERE phone=$1
+           LIMIT 1`,
+          [normalizedPhone]
+        );
+
+      if (existing.rows.length) {
+        return res.status(409).json({
+          error:
+            "رقم الهاتف مسجل مسبقًا",
+        });
+      }
+
+      const passwordHash =
+        await bcrypt.hash(
           password,
-          12
-        ),
-        r,
-        new Date().toISOString(),
-        approved,
-        idCardBuffer,
-        idCardMime,
-      ]
-    );
+          10
+        );
 
-    const user = {
-      id,
-      name: String(name).trim(),
-      email: null,
-      phone: normalizedPhone,
-      role: r,
-    };
+      const userId = id();
 
-    res.json({
-      token: sign(user as any),
-      user,
-      approved: !!approved,
-    });
-  } catch (err) {
-    console.error(
-      "Register error:",
-      err
-    );
+      let cardData: Buffer | null =
+        null;
 
-    res.status(500).json({
-      error:
-        "تعذر إنشاء الحساب",
-    });
+      let cardMime: string | null =
+        null;
+
+      if (
+        requestedRole === "courier"
+      ) {
+        try {
+          cardData = Buffer.from(
+            idCard.data,
+            "base64"
+          );
+
+          cardMime = String(
+            idCard.mime
+          );
+        } catch {
+          return res.status(400).json({
+            error:
+              "صورة بطاقة التعريف غير صالحة",
+          });
+        }
+      }
+
+      const approved =
+        requestedRole === "customer"
+          ? 1
+          : 0;
+
+      const result =
+        await pool.query(
+          `INSERT INTO users
+           (
+             id,
+             name,
+             email,
+             phone,
+             password_hash,
+             role,
+             created_at,
+             online,
+             approved,
+             id_card_data,
+             id_card_mime,
+             courier_debt
+           )
+           VALUES
+           (
+             $1,$2,$3,$4,$5,$6,$7,
+             0,$8,$9,$10,0
+           )
+           RETURNING
+             id,
+             name,
+             email,
+             phone,
+             role`,
+          [
+            userId,
+            String(name).trim(),
+            null,
+            normalizedPhone,
+            passwordHash,
+            requestedRole,
+            new Date().toISOString(),
+            approved,
+            cardData,
+            cardMime,
+          ]
+        );
+
+      const user = result.rows[0];
+
+      const token = sign({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      });
+
+      return res.status(201).json({
+        token,
+        user,
+      });
+    } catch (error) {
+      console.error(
+        "register error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء إنشاء الحساب",
+      });
+    }
   }
-});
+);
 
-app.post("/api/auth/login", async (req, res) => {
-  const phone = String(
-    req.body.phone || ""
-  ).trim();
+app.post(
+  "/api/auth/login",
+  async (req, res) => {
+    try {
+      const {
+        phone,
+        password,
+      } = req.body;
 
-  const row: any = (
-    await pool.query(
-      "SELECT * FROM users WHERE phone=$1",
-      [phone]
-    )
-  ).rows[0];
+      if (!phone || !password) {
+        return res.status(400).json({
+          error:
+            "رقم الهاتف وكلمة المرور مطلوبان",
+        });
+      }
 
-  if (
-    !row ||
-    !bcrypt.compareSync(
-      req.body.password || "",
-      row.password_hash
-    )
-  ) {
-    return res.status(401).json({
-      error:
-        "رقم الهاتف أو كلمة المرور غير صحيحة",
-    });
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             email,
+             phone,
+             password_hash,
+             role,
+             approved
+           FROM users
+           WHERE phone=$1
+           LIMIT 1`,
+          [String(phone).trim()]
+        );
+
+      if (!result.rows.length) {
+        return res.status(401).json({
+          error:
+            "بيانات الدخول غير صحيحة",
+        });
+      }
+
+      const user = result.rows[0];
+
+      const valid =
+        await bcrypt.compare(
+          password,
+          user.password_hash
+        );
+
+      if (!valid) {
+        return res.status(401).json({
+          error:
+            "بيانات الدخول غير صحيحة",
+        });
+      }
+
+      if (
+        user.role === "courier" &&
+        Number(user.approved) !== 1
+      ) {
+        return res.status(403).json({
+          error:
+            "حساب المندوب في انتظار موافقة الإدارة",
+        });
+      }
+
+      const token = sign({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      });
+
+      return res.json({
+        token,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          role: user.role,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "login error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء تسجيل الدخول",
+      });
+    }
   }
-
-  const user = {
-    id: row.id,
-    name: row.name,
-    email: row.email ?? null,
-    phone: row.phone,
-    role: row.role,
-  };
-
-  res.json({
-    token: sign(user as any),
-    user,
-    approved: !!row.approved,
-  });
-});
+);
 
 app.get(
   "/api/auth/me",
   auth,
   async (req, res) => {
-    const row: any = (
-      await pool.query(
-        `SELECT
-          approved,
-          online,
-          courier_debt
-         FROM users
-         WHERE id=$1`,
-        [req.user!.id]
-      )
-    ).rows[0];
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             email,
+             phone,
+             role,
+             approved,
+             online,
+             COALESCE(
+               courier_debt,
+               0
+             ) AS courier_debt
+           FROM users
+           WHERE id=$1`,
+          [req.user!.id]
+        );
 
-    res.json({
-      user: req.user,
-      approved: !!row?.approved,
-      online: !!row?.online,
-      courier_debt:
-        Number(row?.courier_debt || 0),
-    });
-  }
-);
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "المستخدم غير موجود",
+        });
+      }
 
-// =====================================================
-// COURIER PRESENCE & LOCATION
-// =====================================================
+      return res.json({
+        user: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "me error:",
+        error
+      );
 
-app.patch(
-  "/api/couriers/me/status",
-  auth,
-  role("courier"),
-  async (req, res) => {
-    const online =
-      req.body.online ? 1 : 0;
-
-    await pool.query(
-      "UPDATE users SET online=$1 WHERE id=$2",
-      [
-        online,
-        req.user!.id,
-      ]
-    );
-
-    res.json({
-      ok: true,
-      online: !!online,
-    });
-  }
-);
-
-app.patch(
-  "/api/couriers/me/location",
-  auth,
-  role("courier"),
-  async (req, res) => {
-    const lat = Number(
-      req.body.lat
-    );
-
-    const lng = Number(
-      req.body.lng
-    );
-
-    if (
-      !Number.isFinite(lat) ||
-      !Number.isFinite(lng)
-    ) {
-      return res.status(400).json({
+      return res.status(500).json({
         error:
-          "إحداثيات غير صالحة",
+          "حدث خطأ في الخادم",
       });
     }
+  }
+);
 
-    await pool.query(
-      `UPDATE users
-       SET lat=$1,
-           lng=$2,
-           location_updated_at=$3
-       WHERE id=$4`,
-      [
+/* =========================
+   COURIER
+========================= */
+
+app.post(
+  "/api/courier/online",
+  auth,
+  role("courier"),
+  async (req, res) => {
+    try {
+      const { online } = req.body;
+
+      const result =
+        await pool.query(
+          `UPDATE users
+           SET online=$1
+           WHERE id=$2
+             AND role='courier'
+           RETURNING
+             id,
+             name,
+             phone,
+             role,
+             approved,
+             online`,
+          [
+            Boolean(online),
+            req.user!.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "المندوب غير موجود",
+        });
+      }
+
+      return res.json({
+        user: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "courier online error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/courier/location",
+  auth,
+  role("courier"),
+  async (req, res) => {
+    try {
+      const {
         lat,
         lng,
-        new Date().toISOString(),
-        req.user!.id,
-      ]
-    );
+      } = req.body;
 
-    res.json({ ok: true });
+      if (
+        lat === undefined ||
+        lng === undefined
+      ) {
+        return res.status(400).json({
+          error:
+            "الموقع غير صالح",
+        });
+      }
+
+      const result =
+        await pool.query(
+          `UPDATE users
+           SET
+             lat=$1,
+             lng=$2,
+             location_updated_at=$3
+           WHERE id=$4
+             AND role='courier'
+           RETURNING
+             id,
+             lat,
+             lng,
+             location_updated_at`,
+          [
+            Number(lat),
+            Number(lng),
+            new Date().toISOString(),
+            req.user!.id,
+          ]
+        );
+
+      return res.json({
+        location:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "courier location error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
   }
 );
 
 app.get(
-  "/api/couriers/me/stats",
+  "/api/courier/stats",
   auth,
   role("courier"),
   async (req, res) => {
-    const row: any = (
-      await pool.query(
-        `SELECT
-          COUNT(*) c,
-          COALESCE(
-            SUM(final_price),
-            0
-          ) r
-         FROM orders
-         WHERE courier_id=$1
-           AND status='completed'`,
-        [req.user!.id]
-      )
-    ).rows[0];
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             COUNT(*) FILTER (
+               WHERE status='completed'
+             ) AS completed,
+             COUNT(*) FILTER (
+               WHERE status NOT IN
+               ('completed','cancelled')
+             ) AS active,
+             COALESCE(
+               SUM(
+                 CASE
+                   WHEN status='completed'
+                   THEN final_price
+                   ELSE 0
+                 END
+               ),
+               0
+             ) AS earnings
+           FROM orders
+           WHERE courier_id=$1`,
+          [req.user!.id]
+        );
 
-    const debtRow: any = (
-      await pool.query(
-        `SELECT
-          COALESCE(courier_debt,0)
-          AS debt
-         FROM users
-         WHERE id=$1
-           AND role='courier'`,
-        [req.user!.id]
-      )
-    ).rows[0];
+      const debt =
+        await pool.query(
+          `SELECT
+             COALESCE(
+               courier_debt,
+               0
+             ) AS debt
+           FROM users
+           WHERE id=$1`,
+          [req.user!.id]
+        );
 
-    const s =
-      await getSettings();
-
-    const commissionPercent =
-      s.commission_percent ?? 20;
-
-    const totalRevenue =
-      Number(row.r || 0);
-
-    const appCommission =
-      Math.round(
-        totalRevenue *
-          (commissionPercent / 100)
+      return res.json({
+        stats: {
+          completed:
+            Number(
+              result.rows[0]?.completed ||
+                0
+            ),
+          active:
+            Number(
+              result.rows[0]?.active ||
+                0
+            ),
+          earnings:
+            Number(
+              result.rows[0]?.earnings ||
+                0
+            ),
+          debt:
+            Number(
+              debt.rows[0]?.debt ||
+                0
+            ),
+        },
+      });
+    } catch (error) {
+      console.error(
+        "courier stats error:",
+        error
       );
 
-    const courierEarnings =
-      totalRevenue -
-      appCommission;
-
-    const debt =
-      Number(
-        debtRow?.debt || 0
-      );
-
-    res.json({
-      ordersCount: Number(
-        row.c || 0
-      ),
-      totalRevenue,
-      appCommission,
-      courierEarnings,
-      debt,
-    });
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
   }
 );
 
-// =====================================================
-// ORDERS
-// =====================================================
+/* =========================
+   ORDERS
+========================= */
 
 app.get(
   "/api/orders",
   auth,
   async (req, res) => {
-    const u = req.user!;
-
-    let rows: any[];
-
-    if (u.role === "customer") {
-      rows = (
-        await pool.query(
-          `SELECT *
-           FROM orders
-           WHERE customer_id=$1
-           ORDER BY created_at DESC`,
-          [u.id]
-        )
-      ).rows;
-
-      rows = await Promise.all(
-        rows.map(
-          attachCourierInfo
-        )
-      );
-    } else if (
-      u.role === "courier"
-    ) {
-      rows = (
-        await pool.query(
-          `SELECT *
-           FROM orders
-           WHERE status='pending'
-              OR courier_id=$1
-           ORDER BY created_at DESC`,
-          [u.id]
-        )
-      ).rows;
-
-      const me: any = (
-        await pool.query(
-          `SELECT
-            lat,
-            lng
-           FROM users
-           WHERE id=$1`,
-          [u.id]
-        )
-      ).rows[0];
+    try {
+      let result;
 
       if (
-        me?.lat != null &&
-        me?.lng != null
+        req.user!.role ===
+        "customer"
       ) {
-        rows = rows.map(
-          (o) => {
-            if (
-              o.pickup_lat != null &&
-              o.pickup_lng != null
-            ) {
-              return {
-                ...o,
-                distance_from_me_km:
-                  round1(
-                    haversineKm(
-                      me.lat,
-                      me.lng,
-                      o.pickup_lat,
-                      o.pickup_lng
-                    )
-                  ),
-              };
-            }
-
-            return o;
-          }
-        );
-
-        rows.sort(
-          (a, b) => {
-            if (
-              a.status ===
-                "pending" &&
-              b.status ===
-                "pending"
-            ) {
-              const da =
-                a.distance_from_me_km ??
-                Infinity;
-
-              const db_ =
-                b.distance_from_me_km ??
-                Infinity;
-
-              return da - db_;
-            }
-
-            return 0;
-          }
-        );
+        result =
+          await pool.query(
+            `SELECT *
+             FROM orders
+             WHERE customer_id=$1
+             ORDER BY created_at DESC`,
+            [req.user!.id]
+          );
+      } else if (
+        req.user!.role ===
+        "courier"
+      ) {
+        result =
+          await pool.query(
+            `SELECT *
+             FROM orders
+             WHERE
+               courier_id=$1
+               OR (
+                 status='pending'
+                 AND courier_id IS NULL
+               )
+             ORDER BY created_at DESC`,
+            [req.user!.id]
+          );
+      } else {
+        result =
+          await pool.query(
+            `SELECT *
+             FROM orders
+             ORDER BY created_at DESC`
+          );
       }
 
-      rows =
-        sanitizeForCourier(
-          rows
-        );
-    } else {
-      rows = (
-        await pool.query(
-          `SELECT *
-           FROM orders
-           ORDER BY created_at DESC`
-        )
-      ).rows;
-    }
+      const orders = [];
 
-    res.json({ orders: rows });
-  }
-);
-
-app.get(
-  "/api/orders/:id",
-  auth,
-  async (req, res) => {
-    const o: any = (
-      await pool.query(
-        `SELECT *
-         FROM orders
-         WHERE id=$1`,
-        [req.params.id]
-      )
-    ).rows[0];
-
-    if (!o) {
-      return res.status(404).json({
-        error:
-          "الطلب غير موجود",
-      });
-    }
-
-    const u = req.user!;
-
-    if (
-      u.role === "customer"
-    ) {
-      if (
-        o.customer_id !==
-        u.id
-      ) {
-        return res.status(403).json({
-          error: "غير مصرح",
-        });
-      }
-
-      return res.json({
-        order:
+      for (const order of result.rows) {
+        let item =
           await attachCourierInfo(
-            o
-          ),
-      });
-    }
+            order
+          );
 
-    if (
-      u.role === "courier"
-    ) {
-      if (
-        o.status !==
-          "pending" &&
-        o.courier_id !==
-          u.id
-      ) {
-        return res.status(403).json({
-          error: "غير مصرح",
-        });
+        if (
+          req.user!.role ===
+          "courier"
+        ) {
+          item =
+            sanitizeForCourier(
+              item
+            );
+        }
+
+        orders.push(item);
       }
 
       return res.json({
-        order:
-          sanitizeForCourier(
-            [o]
-          )[0],
+        orders,
       });
-    }
+    } catch (error) {
+      console.error(
+        "orders get error:",
+        error
+      );
 
-    res.json({
-      order:
-        await attachCourierInfo(
-          o
-        ),
-    });
-  }
-);
-
-app.get(
-  "/api/orders/:id/timeline",
-  auth,
-  async (req, res) => {
-    const o: any = (
-      await pool.query(
-        `SELECT *
-         FROM orders
-         WHERE id=$1`,
-        [req.params.id]
-      )
-    ).rows[0];
-
-    if (!o) {
-      return res.status(404).json({
+      return res.status(500).json({
         error:
-          "الطلب غير موجود",
+          "حدث خطأ في جلب الطلبات",
       });
     }
-
-    const u = req.user!;
-
-    const allowed =
-      u.role === "admin" ||
-      o.customer_id === u.id ||
-      o.courier_id === u.id;
-
-    if (!allowed) {
-      return res.status(403).json({
-        error: "غير مصرح",
-      });
-    }
-
-    const history = (
-      await pool.query(
-        `SELECT
-          status,
-          created_at
-         FROM order_status_history
-         WHERE order_id=$1
-         ORDER BY created_at ASC`,
-        [req.params.id]
-      )
-    ).rows;
-
-    res.json({ history });
-  }
-);
-
-app.get(
-  "/api/orders/:id/nearby-couriers-count",
-  auth,
-  role("customer"),
-  async (req, res) => {
-    const o: any = (
-      await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
-        [req.params.id]
-      )
-    ).rows[0];
-
-    if (
-      !o ||
-      o.customer_id !==
-        req.user!.id
-    ) {
-      return res.status(404).json({
-        error:
-          "الطلب غير موجود",
-      });
-    }
-
-    if (
-      o.pickup_lat == null ||
-      o.pickup_lng == null
-    ) {
-      return res.json({
-        count: null,
-      });
-    }
-
-    const s =
-      await getSettings();
-
-    const couriers: any[] = (
-      await pool.query(
-        `SELECT
-          lat,
-          lng
-         FROM users
-         WHERE role='courier'
-           AND online=1
-           AND approved=1
-           AND lat IS NOT NULL`
-      )
-    ).rows;
-
-    const count =
-      couriers.filter(
-        (c) =>
-          haversineKm(
-            o.pickup_lat,
-            o.pickup_lng,
-            c.lat,
-            c.lng
-          ) <=
-          s.search_radius_km
-      ).length;
-
-    res.json({ count });
   }
 );
 
@@ -808,106 +737,8 @@ app.post(
   auth,
   role("customer"),
   async (req, res) => {
-    const {
-      pickup_address,
-      delivery_address,
-      pickup_lat,
-      pickup_lng,
-      delivery_lat,
-      delivery_lng,
-      distance_km,
-      offered_price,
-      package_description,
-      notes,
-    } = req.body;
-
-    if (
-      !pickup_address ||
-      !delivery_address
-    ) {
-      return res.status(400).json({
-        error:
-          "العناوين مطلوبة",
-      });
-    }
-
-    let d: number;
-
-    const hasCoords = [
-      pickup_lat,
-      pickup_lng,
-      delivery_lat,
-      delivery_lng,
-    ].every(
-      (v) =>
-        v !== undefined &&
-        v !== null &&
-        Number.isFinite(
-          Number(v)
-        )
-    );
-
-    if (hasCoords) {
-      d = round1(
-        haversineKm(
-          Number(pickup_lat),
-          Number(pickup_lng),
-          Number(delivery_lat),
-          Number(delivery_lng)
-        )
-      );
-    } else if (
-      distance_km !==
-        undefined &&
-      distance_km !== null
-    ) {
-      d = Number(
-        distance_km
-      );
-    } else {
-      return res.status(400).json({
-        error:
-          "حدّد الموقعين على الخريطة أو أدخل المسافة",
-      });
-    }
-
-    const price =
-      await calcPrice(
-        d,
-        offered_price
-      );
-
-    const id =
-      crypto.randomUUID();
-
-    const now =
-      new Date().toISOString();
-
-    /*
-     * يتم أخذ رقم العميل تلقائيًا من
-     * حسابه، ولا يحتاج العميل لإدخاله.
-     */
-    const customer: any = (
-      await pool.query(
-        `SELECT phone
-         FROM users
-         WHERE id=$1
-           AND role='customer'`,
-        [req.user!.id]
-      )
-    ).rows[0];
-
-    if (!customer?.phone) {
-      return res.status(400).json({
-        error:
-          "تعذر الحصول على رقم هاتف العميل",
-      });
-    }
-
-    await pool.query(
-      `INSERT INTO orders(
-        id,
-        customer_id,
+    try {
+      const {
         pickup_address,
         delivery_address,
         pickup_lat,
@@ -916,849 +747,922 @@ app.post(
         delivery_lng,
         distance_km,
         package_description,
-        recipient_phone,
         notes,
         offered_price,
-        final_price,
-        status,
-        confirmation_code,
-        created_at,
-        updated_at
-      )
-      VALUES(
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-        $11,$12,$13,$14,$15,$16,$17,$18
-      )`,
-      [
-        id,
-        req.user!.id,
-        pickup_address,
-        delivery_address,
-        hasCoords
-          ? Number(pickup_lat)
-          : null,
-        hasCoords
-          ? Number(pickup_lng)
-          : null,
-        hasCoords
-          ? Number(delivery_lat)
-          : null,
-        hasCoords
-          ? Number(delivery_lng)
-          : null,
-        d,
-        package_description ||
-          null,
+      } = req.body;
 
-        /*
-         * رقم العميل نفسه هو هاتف المستلم
-         * في الطلب.
-         */
-        customer.phone,
+      if (
+        !pickup_address ||
+        !delivery_address
+      ) {
+        return res.status(400).json({
+          error:
+            "عنوان الاستلام والتوصيل مطلوبان",
+        });
+      }
 
-        notes || null,
-        offered_price ?? null,
-        price,
-        "pending",
+      const distance =
+        Number(distance_km);
 
-        /*
-         * لم يعد هناك رمز تأكيد.
-         * العمود القديم يبقى في قاعدة البيانات
-         * فقط لتجنب الحاجة إلى حذف العمود.
-         */
-        null,
+      if (
+        !Number.isFinite(
+          distance
+        ) ||
+        distance <= 0
+      ) {
+        return res.status(400).json({
+          error:
+            "المسافة غير صالحة",
+        });
+      }
 
-        now,
-        now,
-      ]
-    );
+      const finalPrice =
+        Number.isFinite(
+          Number(offered_price)
+        ) &&
+        Number(offered_price) > 0
+          ? Number(offered_price)
+          : await calcPrice(
+              distance
+            );
 
-    await recordStatus(
-      id,
-      "pending"
-    );
+      const customer =
+        await pool.query(
+          `SELECT phone
+           FROM users
+           WHERE id=$1`,
+          [req.user!.id]
+        );
 
-    res.json({
-      ok: true,
-      id,
-      final_price: price,
-      distance_km: d,
-    });
+      const recipientPhone =
+        customer.rows[0]?.phone ||
+        null;
+
+      const orderId = id();
+
+      const now =
+        new Date().toISOString();
+
+      const result =
+        await pool.query(
+          `INSERT INTO orders
+           (
+             id,
+             customer_id,
+             courier_id,
+             pickup_address,
+             delivery_address,
+             pickup_lat,
+             pickup_lng,
+             delivery_lat,
+             delivery_lng,
+             distance_km,
+             package_description,
+             recipient_phone,
+             notes,
+             offered_price,
+             final_price,
+             status,
+             confirmation_code,
+             created_at,
+             updated_at
+           )
+           VALUES
+           (
+             $1,$2,NULL,$3,$4,
+             $5,$6,$7,$8,$9,
+             $10,$11,$12,$13,$14,
+             'pending',NULL,$15,$15
+           )
+           RETURNING *`,
+          [
+            orderId,
+            req.user!.id,
+            pickup_address,
+            delivery_address,
+            pickup_lat ??
+              null,
+            pickup_lng ??
+              null,
+            delivery_lat ??
+              null,
+            delivery_lng ??
+              null,
+            distance,
+            package_description ??
+              null,
+            recipientPhone,
+            notes ?? null,
+            offered_price ??
+              null,
+            finalPrice,
+            now,
+          ]
+        );
+
+      await recordStatus(
+        orderId,
+        "pending"
+      );
+
+      return res.status(201).json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "order create error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء إنشاء الطلب",
+      });
+    }
   }
 );
+
+/* =========================
+   ACCEPT ORDER
+========================= */
 
 app.post(
   "/api/orders/:id/accept",
   auth,
   role("courier"),
   async (req, res) => {
-    const me: any = (
-      await pool.query(
-        `SELECT approved
-         FROM users
-         WHERE id=$1`,
-        [req.user!.id]
-      )
-    ).rows[0];
-
-    if (!me?.approved) {
-      return res.status(403).json({
-        error:
-          "حسابك بانتظار اعتماد الإدارة قبل قبول الطلبات",
-      });
-    }
-
-    const r =
-      await pool.query(
-        `UPDATE orders
-         SET courier_id=$1,
+    try {
+      const result =
+        await pool.query(
+          `UPDATE orders
+           SET
+             courier_id=$1,
              status='accepted',
              updated_at=$2
-         WHERE id=$3
-           AND status='pending'`,
-        [
-          req.user!.id,
-          new Date().toISOString(),
-          req.params.id,
-        ]
+           WHERE id=$3
+             AND status='pending'
+             AND courier_id IS NULL
+           RETURNING *`,
+          [
+            req.user!.id,
+            new Date().toISOString(),
+            req.params.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(409).json({
+          error:
+            "الطلب لم يعد متاحًا",
+        });
+      }
+
+      await recordStatus(
+        req.params.id,
+        "accepted"
       );
 
-    if (!r.rowCount) {
-      return res.status(409).json({
+      return res.json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "accept error:",
+        error
+      );
+
+      return res.status(500).json({
         error:
-          "الطلب غير متاح",
+          "حدث خطأ في الخادم",
       });
     }
-
-    await recordStatus(
-      req.params.id as string,
-      "accepted"
-    );
-
-    res.json({ ok: true });
   }
 );
+
+/* =========================
+   PICKUP
+========================= */
 
 app.post(
   "/api/orders/:id/pickup",
   auth,
   role("courier"),
   async (req, res) => {
-    const o: any = (
-      await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
-        [req.params.id]
-      )
-    ).rows[0];
+    try {
+      const result =
+        await pool.query(
+          `UPDATE orders
+           SET
+             status='picked_up',
+             updated_at=$1
+           WHERE id=$2
+             AND courier_id=$3
+             AND status='accepted'
+           RETURNING *`,
+          [
+            new Date().toISOString(),
+            req.params.id,
+            req.user!.id,
+          ]
+        );
 
-    if (
-      !o ||
-      o.courier_id !==
-        req.user!.id
-    ) {
-      return res.status(404).json({
-        error:
-          "الطلب غير موجود",
-      });
-    }
+      if (!result.rows.length) {
+        return res.status(409).json({
+          error:
+            "لا يمكن استلام هذا الطلب الآن",
+        });
+      }
 
-    if (
-      o.status !==
-      "accepted"
-    ) {
-      return res.status(409).json({
-        error:
-          "حالة الطلب غير صالحة",
-      });
-    }
-
-    await pool.query(
-      `UPDATE orders
-       SET status='picked_up',
-           updated_at=$1
-       WHERE id=$2`,
-      [
-        new Date().toISOString(),
+      await recordStatus(
         req.params.id,
-      ]
-    );
+        "picked_up"
+      );
 
-    await recordStatus(
-      req.params.id as string,
-      "picked_up"
-    );
+      return res.json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "pickup error:",
+        error
+      );
 
-    res.json({ ok: true });
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
   }
 );
 
-app.post(
-  "/api/orders/:id/unassign",
-  auth,
-  role("courier"),
-  async (req, res) => {
-    const o: any = (
-      await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
-        [req.params.id]
-      )
-    ).rows[0];
-
-    if (
-      !o ||
-      o.courier_id !==
-        req.user!.id
-    ) {
-      return res.status(404).json({
-        error:
-          "الطلب غير موجود",
-      });
-    }
-
-    if (
-      o.status !==
-      "accepted"
-    ) {
-      return res.status(409).json({
-        error:
-          "لا يمكن التراجع عن هذا الطلب الآن",
-      });
-    }
-
-    await pool.query(
-      `UPDATE orders
-       SET courier_id=NULL,
-           status='pending',
-           updated_at=$1
-       WHERE id=$2`,
-      [
-        new Date().toISOString(),
-        req.params.id,
-      ]
-    );
-
-    await recordStatus(
-      req.params.id as string,
-      "pending"
-    );
-
-    res.json({ ok: true });
-  }
-);
-
-app.post(
-  "/api/orders/:id/cancel",
-  auth,
-  async (req, res) => {
-    const o: any = (
-      await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
-        [req.params.id]
-      )
-    ).rows[0];
-
-    if (!o) {
-      return res.status(404).json({
-        error:
-          "الطلب غير موجود",
-      });
-    }
-
-    const u = req.user!;
-
-    const allowed =
-      u.role === "admin" ||
-      (u.role === "customer" &&
-        o.customer_id === u.id);
-
-    if (!allowed) {
-      return res.status(403).json({
-        error: "غير مصرح",
-      });
-    }
-
-    if (
-      ![
-        "pending",
-        "accepted",
-      ].includes(o.status)
-    ) {
-      return res.status(409).json({
-        error:
-          "لا يمكن إلغاء هذا الطلب",
-      });
-    }
-
-    await pool.query(
-      `UPDATE orders
-       SET status='cancelled',
-           updated_at=$1
-       WHERE id=$2`,
-      [
-        new Date().toISOString(),
-        req.params.id,
-      ]
-    );
-
-    await recordStatus(
-      req.params.id as string,
-      "cancelled"
-    );
-
-    res.json({ ok: true });
-  }
-);
+/* =========================
+   DELIVER
+========================= */
 
 app.post(
   "/api/orders/:id/deliver",
   auth,
   role("courier"),
   async (req, res) => {
-    const o: any = (
-      await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
-        [req.params.id]
-      )
-    ).rows[0];
+    try {
+      const result =
+        await pool.query(
+          `UPDATE orders
+           SET
+             status='delivered',
+             updated_at=$1
+           WHERE id=$2
+             AND courier_id=$3
+             AND status='picked_up'
+           RETURNING *`,
+          [
+            new Date().toISOString(),
+            req.params.id,
+            req.user!.id,
+          ]
+        );
 
-    if (
-      !o ||
-      o.courier_id !==
-        req.user!.id
-    ) {
-      return res.status(404).json({
-        error:
-          "الطلب غير موجود",
-      });
-    }
+      if (!result.rows.length) {
+        return res.status(409).json({
+          error:
+            "لا يمكن إنهاء التوصيل الآن",
+        });
+      }
 
-    if (
-      o.status !==
-      "picked_up"
-    ) {
-      return res.status(409).json({
-        error:
-          "حالة الطلب غير صالحة",
-      });
-    }
-
-    await pool.query(
-      `UPDATE orders
-       SET status='delivered',
-           updated_at=$1
-       WHERE id=$2`,
-      [
-        new Date().toISOString(),
+      await recordStatus(
         req.params.id,
-      ]
-    );
+        "delivered"
+      );
 
-    await recordStatus(
-      req.params.id as string,
-      "delivered"
-    );
+      return res.json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "deliver error:",
+        error
+      );
 
-    res.json({ ok: true });
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
   }
 );
 
-// =====================================================
-// RATINGS + COURIER DEBT
-// =====================================================
+/* =========================
+   CANCEL
+========================= */
 
 app.post(
-  "/api/orders/:id/rate",
+  "/api/orders/:id/cancel",
+  auth,
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `UPDATE orders
+           SET
+             status='cancelled',
+             updated_at=$1
+           WHERE id=$2
+             AND (
+               customer_id=$3
+               OR courier_id=$3
+             )
+             AND status NOT IN
+             ('completed','cancelled')
+           RETURNING *`,
+          [
+            new Date().toISOString(),
+            req.params.id,
+            req.user!.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(409).json({
+          error:
+            "لا يمكن إلغاء هذا الطلب",
+        });
+      }
+
+      await recordStatus(
+        req.params.id,
+        "cancelled"
+      );
+
+      return res.json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "cancel error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+/* =========================
+   RATING + COMMISSION
+========================= */
+
+app.post(
+  "/api/orders/:id/rating",
   auth,
   role("customer"),
   async (req, res) => {
-    const o: any = (
-      await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
-        [req.params.id]
-      )
-    ).rows[0];
-
-    if (
-      !o ||
-      o.customer_id !==
-        req.user!.id
-    ) {
-      return res.status(404).json({
-        error:
-          "الطلب غير موجود",
-      });
-    }
-
-    if (
-      o.status !==
-      "delivered"
-    ) {
-      return res.status(409).json({
-        error:
-          "لا يمكن التقييم الآن",
-      });
-    }
-
-    if (!o.courier_id) {
-      return res.status(409).json({
-        error:
-          "لا يوجد مندوب مرتبط بهذا الطلب",
-      });
-    }
-
-    const stars = Number(
-      req.body.stars
-    );
-
-    if (
-      !stars ||
-      stars < 1 ||
-      stars > 5
-    ) {
-      return res.status(400).json({
-        error:
-          "التقييم غير صالح",
-      });
-    }
-
-    const existing = (
-      await pool.query(
-        `SELECT id
-         FROM ratings
-         WHERE order_id=$1`,
-        [o.id]
-      )
-    ).rows[0];
-
-    if (existing) {
-      return res.status(409).json({
-        error:
-          "تم التقييم مسبقًا",
-      });
-    }
-
-    /*
-     * نحصل على نسبة العمولة الحالية.
-     */
-    const settings =
-      await getSettings();
-
-    const commissionPercent =
-      settings.commission_percent ??
-      20;
-
-    /*
-     * عمولة هذا الطلب التي ستصبح دينًا
-     * على المندوب للتطبيق.
-     */
-    const commission =
-      Number(o.final_price || 0) *
-      (commissionPercent / 100);
-
-    /*
-     * تسجيل التقييم.
-     */
-    await pool.query(
-      `INSERT INTO ratings
-       VALUES($1,$2,$3,$4,$5,$6,$7)`,
-      [
-        crypto.randomUUID(),
-        o.id,
-        o.customer_id,
-        o.courier_id,
+    try {
+      const {
         stars,
-        req.body.comment ||
-          null,
-        new Date().toISOString(),
-      ]
-    );
+        comment,
+      } = req.body;
 
-    /*
-     * إضافة عمولة الطلب إلى دين المندوب.
-     */
-    await pool.query(
-      `UPDATE users
-       SET courier_debt =
-         COALESCE(courier_debt,0) +
-         $1
-       WHERE id=$2
-         AND role='courier'`,
-      [
-        commission,
-        o.courier_id,
-      ]
-    );
+      const rating =
+        Number(stars);
 
-    /*
-     * بعد التقييم يصبح الطلب مكتملًا.
-     */
-    await pool.query(
-      `UPDATE orders
-       SET status='completed',
-           updated_at=$1
-       WHERE id=$2`,
-      [
-        new Date().toISOString(),
-        o.id,
-      ]
-    );
+      if (
+        !Number.isInteger(
+          rating
+        ) ||
+        rating < 1 ||
+        rating > 5
+      ) {
+        return res.status(400).json({
+          error:
+            "التقييم يجب أن يكون من 1 إلى 5",
+        });
+      }
 
-    await recordStatus(
-      o.id,
-      "completed"
-    );
+      const orderResult =
+        await pool.query(
+          `SELECT *
+           FROM orders
+           WHERE id=$1
+             AND customer_id=$2`,
+          [
+            req.params.id,
+            req.user!.id,
+          ]
+        );
 
-    res.json({
-      ok: true,
-      commission_added:
-        commission,
-    });
-  }
-);
+      if (
+        !orderResult.rows.length
+      ) {
+        return res.status(404).json({
+          error:
+            "الطلب غير موجود",
+        });
+      }
 
-app.get(
-  "/api/couriers/:id/ratings",
-  auth,
-  async (req, res) => {
-    const rows: any[] = (
-      await pool.query(
-        `SELECT
-          stars,
-          comment,
-          created_at
-         FROM ratings
-         WHERE courier_id=$1
-         ORDER BY created_at DESC`,
-        [req.params.id]
-      )
-    ).rows;
+      const order =
+        orderResult.rows[0];
 
-    const avg = rows.length
-      ? rows.reduce(
-          (s, x) =>
-            s + x.stars,
-          0
-        ) / rows.length
-      : 0;
+      if (
+        order.status !==
+        "delivered"
+      ) {
+        return res.status(400).json({
+          error:
+            "يمكن تقييم الطلب بعد اكتمال التوصيل",
+        });
+      }
 
-    res.json({
-      ratings: rows,
-      average:
+      if (!order.courier_id) {
+        return res.status(400).json({
+          error:
+            "لا يوجد مندوب لهذا الطلب",
+        });
+      }
+
+      const oldRating =
+        await pool.query(
+          `SELECT id
+           FROM ratings
+           WHERE order_id=$1
+           LIMIT 1`,
+          [req.params.id]
+        );
+
+      if (oldRating.rows.length) {
+        return res.status(409).json({
+          error:
+            "تم تقييم هذا الطلب مسبقًا",
+        });
+      }
+
+      const settings =
+        await getSettings();
+
+      const commissionPercent =
+        Number(
+          settings.commission_percent ??
+            20
+        );
+
+      const finalPrice =
+        Number(
+          order.final_price || 0
+        );
+
+      const commission =
         Math.round(
-          avg * 10
-        ) / 10,
-      count: rows.length,
-    });
+          (
+            (finalPrice *
+              commissionPercent) /
+            100
+          ) * 100
+        ) / 100;
+
+      await pool.query(
+        `INSERT INTO ratings
+         (
+           id,
+           order_id,
+           customer_id,
+           courier_id,
+           stars,
+           comment,
+           created_at
+         )
+         VALUES
+         ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          id(),
+          req.params.id,
+          req.user!.id,
+          order.courier_id,
+          rating,
+          comment ??
+            null,
+          new Date().toISOString(),
+        ]
+      );
+
+      if (commission > 0) {
+        await pool.query(
+          `UPDATE users
+           SET
+             courier_debt =
+               COALESCE(
+                 courier_debt,
+                 0
+               ) + $1
+           WHERE id=$2
+             AND role='courier'`,
+          [
+            commission,
+            order.courier_id,
+          ]
+        );
+      }
+
+      const completed =
+        await pool.query(
+          `UPDATE orders
+           SET
+             status='completed',
+             updated_at=$1
+           WHERE id=$2
+           RETURNING *`,
+          [
+            new Date().toISOString(),
+            req.params.id,
+          ]
+        );
+
+      await recordStatus(
+        req.params.id,
+        "completed"
+      );
+
+      return res.json({
+        order:
+          completed.rows[0],
+        commission,
+      });
+    } catch (error) {
+      console.error(
+        "rating error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء تسجيل التقييم",
+      });
+    }
   }
 );
 
-// =====================================================
-// COMPLAINTS
-// =====================================================
+/* =========================
+   COMPLAINTS
+========================= */
 
 app.post(
   "/api/complaints",
   auth,
   async (req, res) => {
-    const {
-      order_id,
-      message,
-    } = req.body;
+    try {
+      const {
+        order_id,
+        message,
+      } = req.body;
 
-    if (!message) {
-      return res.status(400).json({
+      if (!message) {
+        return res.status(400).json({
+          error:
+            "الشكوى مطلوبة",
+        });
+      }
+
+      const now =
+        new Date().toISOString();
+
+      const result =
+        await pool.query(
+          `INSERT INTO complaints
+           (
+             id,
+             order_id,
+             user_id,
+             message,
+             status,
+             response,
+             created_at,
+             updated_at
+           )
+           VALUES
+           (
+             $1,$2,$3,$4,
+             'pending',
+             NULL,$5,$5
+           )
+           RETURNING *`,
+          [
+            id(),
+            order_id ??
+              null,
+            req.user!.id,
+            message,
+            now,
+          ]
+        );
+
+      return res.status(201).json({
+        complaint:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "complaint error:",
+        error
+      );
+
+      return res.status(500).json({
         error:
-          "الرسالة مطلوبة",
+          "حدث خطأ أثناء إرسال الشكوى",
       });
     }
-
-    const now =
-      new Date().toISOString();
-
-    await pool.query(
-      `INSERT INTO complaints
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [
-        crypto.randomUUID(),
-        order_id || null,
-        req.user!.id,
-        message,
-        "pending",
-        null,
-        now,
-        now,
-      ]
-    );
-
-    res.json({ ok: true });
   }
 );
 
-app.get(
-  "/api/complaints",
-  auth,
-  async (req, res) => {
-    const u = req.user!;
-
-    const rows =
-      u.role === "admin"
-        ? (
-            await pool.query(
-              `SELECT *
-               FROM complaints
-               ORDER BY created_at DESC`
-            )
-          ).rows
-        : (
-            await pool.query(
-              `SELECT *
-               FROM complaints
-               WHERE user_id=$1
-               ORDER BY created_at DESC`,
-              [u.id]
-            )
-          ).rows;
-
-    res.json({
-      complaints: rows,
-    });
-  }
-);
-
-app.patch(
-  "/api/complaints/:id",
-  auth,
-  role("admin"),
-  async (req, res) => {
-    const {
-      status,
-      response,
-    } = req.body;
-
-    await pool.query(
-      `UPDATE complaints
-       SET status=$1,
-           response=$2,
-           updated_at=$3
-       WHERE id=$4`,
-      [
-        status ||
-          "resolved",
-        response || null,
-        new Date().toISOString(),
-        req.params.id,
-      ]
-    );
-
-    res.json({ ok: true });
-  }
-);
-
-// =====================================================
-// ADMIN
-// =====================================================
+/* =========================
+   ADMIN - USERS
+========================= */
 
 app.get(
   "/api/admin/users",
   auth,
   role("admin"),
   async (_req, res) => {
-    const rows = (
-      await pool.query(
-        `SELECT
-          id,
-          name,
-          email,
-          phone,
-          role,
-          created_at,
-          online,
-          approved
-         FROM users
-         ORDER BY created_at DESC`
-      )
-    ).rows;
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             email,
+             phone,
+             role,
+             approved,
+             online,
+             created_at
+           FROM users
+           ORDER BY created_at DESC`
+        );
 
-    res.json({
-      users: rows,
-    });
+      return res.json({
+        users:
+          result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "admin users error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب المستخدمين",
+      });
+    }
   }
 );
+
+/* =========================
+   ADMIN - COURIERS
+========================= */
 
 app.get(
   "/api/admin/couriers",
   auth,
   role("admin"),
   async (_req, res) => {
-    const rows = (
-      await pool.query(
-        `SELECT
-          id,
-          name,
-          email,
-          phone,
-          created_at,
-          online,
-          approved,
-          lat,
-          lng,
-          location_updated_at,
-          COALESCE(
-            courier_debt,
-            0
-          ) AS courier_debt,
-          (
-            id_card_data
-            IS NOT NULL
-          ) AS has_id_card
-         FROM users
-         WHERE role='courier'
-         ORDER BY created_at DESC`
-      )
-    ).rows;
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             email,
+             phone,
+             role,
+             approved,
+             online,
+             lat,
+             lng,
+             location_updated_at,
+             created_at,
+             (
+               id_card_data IS NOT NULL
+             ) AS has_id_card,
+             COALESCE(
+               courier_debt,
+               0
+             ) AS courier_debt
+           FROM users
+           WHERE role='courier'
+           ORDER BY created_at DESC`
+        );
 
-    res.json({
-      couriers: rows,
-    });
+      return res.json({
+        couriers:
+          result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "admin couriers error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب المندوبين",
+      });
+    }
   }
 );
 
-// عرض بطاقة تعريف المندوب للأدمن فقط
+/* =========================
+   ADMIN - ID CARD
+========================= */
+
 app.get(
   "/api/admin/couriers/:id/id-card",
   auth,
   role("admin"),
   async (req, res) => {
-    const row: any = (
-      await pool.query(
-        `SELECT
-          id_card_data,
-          id_card_mime
-         FROM users
-         WHERE id=$1
-           AND role='courier'`,
-        [req.params.id]
-      )
-    ).rows[0];
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             id_card_data,
+             id_card_mime
+           FROM users
+           WHERE id=$1
+             AND role='courier'`,
+          [req.params.id]
+        );
 
-    if (
-      !row?.id_card_data
-    ) {
-      return res.status(404).json({
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "المندوب غير موجود",
+        });
+      }
+
+      const row =
+        result.rows[0];
+
+      if (!row.id_card_data) {
+        return res.status(404).json({
+          error:
+            "بطاقة التعريف غير موجودة",
+        });
+      }
+
+      res.setHeader(
+        "Content-Type",
+        row.id_card_mime ||
+          "image/jpeg"
+      );
+
+      return res.send(
+        row.id_card_data
+      );
+    } catch (error) {
+      console.error(
+        "id card error:",
+        error
+      );
+
+      return res.status(500).json({
         error:
-          "بطاقة التعريف غير موجودة",
+          "حدث خطأ في الخادم",
       });
     }
-
-    res.setHeader(
-      "Content-Type",
-      row.id_card_mime ||
-        "application/octet-stream"
-    );
-
-    res.setHeader(
-      "Cache-Control",
-      "no-store"
-    );
-
-    res.send(
-      row.id_card_data
-    );
   }
 );
 
-app.patch(
+/* =========================
+   ADMIN - APPROVE COURIER
+========================= */
+
+app.post(
   "/api/admin/couriers/:id/approve",
   auth,
   role("admin"),
   async (req, res) => {
-    const approved =
-      req.body.approved
-        ? 1
-        : 0;
+    try {
+      const result =
+        await pool.query(
+          `UPDATE users
+           SET approved=1
+           WHERE id=$1
+             AND role='courier'
+           RETURNING
+             id,
+             name,
+             phone,
+             role,
+             approved,
+             online`,
+          [req.params.id]
+        );
 
-    const r =
-      await pool.query(
-        `UPDATE users
-         SET approved=$1
-         WHERE id=$2
-           AND role='courier'`,
-        [
-          approved,
-          req.params.id,
-        ]
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "المندوب غير موجود",
+        });
+      }
+
+      return res.json({
+        user:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "approve error:",
+        error
       );
 
-    if (!r.rowCount) {
-      return res.status(404).json({
+      return res.status(500).json({
         error:
-          "المندوب غير موجود",
+          "حدث خطأ في الخادم",
       });
     }
-
-    res.json({
-      ok: true,
-      approved:
-        !!approved,
-    });
   }
 );
 
-// =====================================================
-// COURIER DEBT - ADMIN
-// =====================================================
+/* =========================
+   ADMIN - DEBT PAID
+========================= */
 
-/*
- * تسجيل استلام دين المندوب بالكامل.
- *
- * عند الضغط على "تم الاستلام"
- * يتم تصفير الدين الحالي للمندوب.
- */
 app.patch(
   "/api/admin/couriers/:id/debt/paid",
   auth,
   role("admin"),
   async (req, res) => {
-    const result =
-      await pool.query(
-        `UPDATE users
-         SET courier_debt=0
-         WHERE id=$1
-           AND role='courier'
-         RETURNING
-           id,
-           name,
-           COALESCE(
-             courier_debt,
-             0
-           ) AS courier_debt`,
-        [req.params.id]
+    try {
+      const result =
+        await pool.query(
+          `UPDATE users
+           SET courier_debt=0
+           WHERE id=$1
+             AND role='courier'
+           RETURNING
+             id,
+             name,
+             COALESCE(
+               courier_debt,
+               0
+             ) AS courier_debt`,
+          [req.params.id]
+        );
+
+      if (!result.rowCount) {
+        return res.status(404).json({
+          error:
+            "المندوب غير موجود",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        courier_debt:
+          Number(
+            result.rows[0]
+              .courier_debt || 0
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "debt paid error:",
+        error
       );
 
-    if (!result.rowCount) {
-      return res.status(404).json({
+      return res.status(500).json({
         error:
-          "المندوب غير موجود",
+          "حدث خطأ أثناء تحديث الدين",
       });
     }
-
-    res.json({
-      ok: true,
-      courier:
-        result.rows[0],
-    });
   }
 );
+
+/* =========================
+   ADMIN - SETTINGS
+========================= */
 
 app.get(
   "/api/admin/settings",
   auth,
   role("admin"),
   async (_req, res) => {
-    res.json({
-      settings:
-        await getSettings(),
-    });
+    try {
+      return res.json({
+        settings:
+          await getSettings(),
+      });
+    } catch (error) {
+      console.error(
+        "settings get error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب الإعدادات",
+      });
+    }
   }
 );
 
@@ -1767,186 +1671,280 @@ app.patch(
   auth,
   role("admin"),
   async (req, res) => {
-    const updates =
-      req.body as Record<
-        string,
-        number
-      >;
+    try {
+      const settings =
+        req.body?.settings ||
+        req.body ||
+        {};
 
-    const stmt =
-      `INSERT INTO settings(
+      for (const [
         key,
-        value
-      )
-      VALUES($1,$2)
-      ON CONFLICT(key)
-      DO UPDATE
-      SET value=excluded.value`;
+        value,
+      ] of Object.entries(
+        settings
+      )) {
+        if (
+          typeof value ===
+          "object"
+        ) {
+          continue;
+        }
 
-    for (const [
-      k,
-      v,
-    ] of Object.entries(
-      updates
-    )) {
-      await pool.query(
-        stmt,
-        [
-          k,
-          String(v),
-        ]
+        await pool.query(
+          `INSERT INTO settings
+           (key,value)
+           VALUES ($1,$2)
+           ON CONFLICT(key)
+           DO UPDATE SET
+             value=EXCLUDED.value`,
+          [
+            key,
+            String(value),
+          ]
+        );
+      }
+
+      return res.json({
+        settings:
+          await getSettings(),
+      });
+    } catch (error) {
+      console.error(
+        "settings update error:",
+        error
       );
-    }
 
-    res.json({
-      ok: true,
-      settings:
-        await getSettings(),
-    });
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء حفظ الإعدادات",
+      });
+    }
   }
 );
+
+/* =========================
+   ADMIN - STATS
+========================= */
 
 app.get(
   "/api/admin/stats",
   auth,
   role("admin"),
   async (_req, res) => {
-    const ordersByStatus =
-      (
+    try {
+      const result =
         await pool.query(
           `SELECT
-            status,
-            COUNT(*) c
-           FROM orders
-           GROUP BY status`
-        )
-      ).rows;
+             COUNT(*) AS orders,
+             COUNT(*) FILTER (
+               WHERE status NOT IN
+               ('completed','cancelled')
+             ) AS active_orders,
+             COUNT(*) FILTER (
+               WHERE status='completed'
+             ) AS completed,
+             COALESCE(
+               SUM(
+                 CASE
+                   WHEN status='completed'
+                   THEN final_price
+                   ELSE 0
+                 END
+               ),
+               0
+             ) AS revenue
+           FROM orders`
+        );
 
-    const usersByRole =
-      (
+      const users =
         await pool.query(
           `SELECT
-            role,
-            COUNT(*) c
-           FROM users
-           GROUP BY role`
-        )
-      ).rows;
+             COUNT(*) AS users,
+             COUNT(*) FILTER (
+               WHERE role='customer'
+             ) AS customers,
+             COUNT(*) FILTER (
+               WHERE role='courier'
+             ) AS couriers,
+             COUNT(*) FILTER (
+               WHERE role='courier'
+               AND approved=1
+             ) AS approved_couriers
+           FROM users`
+        );
 
-    const revenue: any =
-      (
-        await pool.query(
-          `SELECT
-            COALESCE(
-              SUM(final_price),
-              0
-            ) r
-           FROM orders
-           WHERE status='completed'`
-        )
-      ).rows[0];
+      return res.json({
+        stats: {
+          users:
+            Number(
+              users.rows[0]
+                ?.users || 0
+            ),
+          customers:
+            Number(
+              users.rows[0]
+                ?.customers || 0
+            ),
+          couriers:
+            Number(
+              users.rows[0]
+                ?.couriers || 0
+            ),
+          approvedCouriers:
+            Number(
+              users.rows[0]
+                ?.approved_couriers ||
+                0
+            ),
+          orders:
+            Number(
+              result.rows[0]
+                ?.orders || 0
+            ),
+          activeOrders:
+            Number(
+              result.rows[0]
+                ?.active_orders ||
+                0
+            ),
+          completed:
+            Number(
+              result.rows[0]
+                ?.completed || 0
+            ),
+          revenue:
+            Number(
+              result.rows[0]
+                ?.revenue || 0
+            ),
+        },
+      });
+    } catch (error) {
+      console.error(
+        "admin stats error:",
+        error
+      );
 
-    const activeOrders: any =
-      (
-        await pool.query(
-          `SELECT COUNT(*) c
-           FROM orders
-           WHERE status IN
-             (
-               'pending',
-               'accepted',
-               'picked_up'
-             )`
-        )
-      ).rows[0];
-
-    const couriersOnline: any =
-      (
-        await pool.query(
-          `SELECT COUNT(*) c
-           FROM users
-           WHERE role='courier'
-             AND online=1
-             AND approved=1`
-        )
-      ).rows[0];
-
-    const couriersApproved: any =
-      (
-        await pool.query(
-          `SELECT COUNT(*) c
-           FROM users
-           WHERE role='courier'
-             AND approved=1`
-        )
-      ).rows[0];
-
-    const couriersPending: any =
-      (
-        await pool.query(
-          `SELECT COUNT(*) c
-           FROM users
-           WHERE role='courier'
-             AND approved=0`
-        )
-      ).rows[0];
-
-    res.json({
-      ordersByStatus,
-      usersByRole,
-      revenue:
-        revenue.r,
-      activeOrders:
-        activeOrders.c,
-      couriersOnline:
-        couriersOnline.c,
-      couriersApproved:
-        couriersApproved.c,
-      couriersPending:
-        couriersPending.c,
-    });
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب الإحصائيات",
+      });
+    }
   }
 );
 
-// =====================================================
-// SERVE FRONTEND
-// =====================================================
+/* =========================
+   ADMIN - COMPLAINTS
+========================= */
 
-const __dirname =
-  path.dirname(
-    fileURLToPath(
-      import.meta.url
-    )
-  );
+app.get(
+  "/api/admin/complaints",
+  auth,
+  role("admin"),
+  async (_req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             c.*,
+             u.name AS user_name,
+             u.phone AS user_phone
+           FROM complaints c
+           LEFT JOIN users u
+             ON u.id=c.user_id
+           ORDER BY
+             c.created_at DESC`
+        );
 
-const distPath =
-  path.resolve(
-    __dirname,
-    "..",
-    "dist"
-  );
+      return res.json({
+        complaints:
+          result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "admin complaints error:",
+        error
+      );
 
-app.use(
-  express.static(
-    distPath
-  )
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب الشكاوى",
+      });
+    }
+  }
+);
+
+app.patch(
+  "/api/admin/complaints/:id",
+  auth,
+  role("admin"),
+  async (req, res) => {
+    try {
+      const {
+        status,
+        response,
+      } = req.body;
+
+      const result =
+        await pool.query(
+          `UPDATE complaints
+           SET
+             status=$1,
+             response=$2,
+             updated_at=$3
+           WHERE id=$4
+           RETURNING *`,
+          [
+            status ||
+              "resolved",
+            response ??
+              null,
+            new Date().toISOString(),
+            req.params.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "الشكوى غير موجودة",
+        });
+      }
+
+      return res.json({
+        complaint:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "complaint update error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء تحديث الشكوى",
+      });
+    }
+  }
+);
+
+/* =========================
+   STATIC FRONTEND
+========================= */
+
+const distPath = path.join(
+  process.cwd(),
+  "dist"
 );
 
 app.use(
-  (req, res) => {
-    if (
-      req.path.startsWith(
-        "/api/"
-      )
-    ) {
-      return res
-        .status(404)
-        .json({
-          error:
-            "Not found",
-        });
-    }
+  express.static(distPath)
+);
 
+app.get(
+  "*",
+  (_req, res) => {
     res.sendFile(
       path.join(
         distPath,
@@ -1956,13 +1954,21 @@ app.use(
   }
 );
 
-app.listen(
+/* =========================
+   SERVER
+========================= */
+
+const PORT =
   Number(
     process.env.PORT
-  ) || 4000,
+  ) || 3000;
+
+app.listen(
+  PORT,
   "0.0.0.0",
-  () =>
+  () => {
     console.log(
-      "Wassli API running"
-    )
+      `وصلي يعمل على المنفذ ${PORT}`
+    );
+  }
 );
