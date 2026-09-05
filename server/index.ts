@@ -1,745 +1,2308 @@
-import { useState, useEffect, useRef } from "react";
-import type { User } from "../types";
-import { api } from "../lib/api";
-import { watchPosition } from "../lib/geolocation";
-import { useToast } from "../lib/toast";
+import express from "express";
+import path from "path";
+import crypto from "crypto";
+import { pool } from "./db";
+import {
+  auth,
+  role,
+  sign,
+} from "./auth";
+import bcrypt from "bcryptjs";
 
-interface Order {
-  id: string;
-  pickup_address: string;
-  delivery_address: string;
-  distance_km: number;
-  final_price: number;
-  status: string;
-  package_description?: string;
-  recipient_phone?: string;
-  notes?: string;
-  created_at: string;
+const app = express();
+
+app.use(
+  express.json({
+    limit: "8mb",
+  })
+);
+
+function id() {
+  return crypto.randomUUID();
 }
 
-interface Stats {
-  completed: number;
-  active: number;
-  earnings: number;
-  debt: number;
+async function getSettings() {
+  const result = await pool.query(
+    "SELECT key, value FROM settings"
+  );
+
+  const settings: Record<string, string> = {};
+
+  for (const row of result.rows) {
+    settings[row.key] = row.value;
+  }
+
+  return settings;
 }
 
-const LOCATION_SEND_INTERVAL_MS = 15000;
+async function calcPrice(
+  distanceKm: number
+) {
+  const settings = await getSettings();
 
-export default function CourierDashboard({
-  user,
-  onLogout,
-}: {
-  user: User;
-  onLogout: () => void;
-}) {
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<
-    "available" | "my_orders" | "stats"
-  >("available");
+  const basePrice =
+    Number(settings.base_price ?? 150);
 
-  const [online, setOnline] = useState(false);
-  const [approved, setApproved] = useState<boolean | null>(null);
+  const baseDistance =
+    Number(settings.base_distance_km ?? 2);
 
-  const toast = useToast();
-  const lastSentRef = useRef(0);
-  const stopWatchRef = useRef<(() => void) | null>(null);
+  const extraKmPrice =
+    Number(settings.extra_km_price ?? 50);
 
-  /* =========================
-     بيانات المندوب
-  ========================= */
-
-  const fetchMe = async () => {
-    try {
-      const response = await api<{
-        user: {
-          id: string;
-          name: string;
-          email?: string | null;
-          phone?: string | null;
-          role: string;
-          approved: boolean | number;
-          online: boolean | number;
-          courier_debt?: number | string;
-        };
-      }>("/auth/me");
-
-      const me = response.user;
-
-      if (!me) {
-        return;
-      }
-
-      setApproved(
-        me.approved === true ||
-          Number(me.approved) === 1
-      );
-
-      setOnline(
-        me.online === true ||
-          Number(me.online) === 1
-      );
-    } catch {
-      // غير مهم إذا فشل التحديث
-    }
-  };
-
-  /* =========================
-     الطلبات
-  ========================= */
-
-  const fetchOrders = async () => {
-    try {
-      const data = await api<{
-        orders?: Order[];
-      }>("/orders");
-
-      setOrders(
-        Array.isArray(data.orders)
-          ? data.orders
-          : []
-      );
-    } catch {
-      toast(
-        "خطأ في تحميل الطلبات",
-        "error"
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  /* =========================
-     الإحصائيات
-     Backend يرجع:
-     {
-       stats: {
-         completed,
-         active,
-         earnings,
-         debt
-       }
-     }
-  ========================= */
-
-  const fetchStats = async () => {
-    try {
-      const response = await api<{
-        stats?: {
-          completed?: number | string;
-          active?: number | string;
-          earnings?: number | string;
-          debt?: number | string;
-        };
-      }>("/courier/stats");
-
-      const s = response.stats;
-
-      if (!s) {
-        setStats({
-          completed: 0,
-          active: 0,
-          earnings: 0,
-          debt: 0,
-        });
-        return;
-      }
-
-      setStats({
-        completed: Number(
-          s.completed ?? 0
-        ),
-        active: Number(
-          s.active ?? 0
-        ),
-        earnings: Number(
-          s.earnings ?? 0
-        ),
-        debt: Number(
-          s.debt ?? 0
-        ),
-      });
-    } catch {
-      setStats({
-        completed: 0,
-        active: 0,
-        earnings: 0,
-        debt: 0,
-      });
-    }
-  };
-
-  useEffect(() => {
-    fetchMe();
-    fetchOrders();
-    fetchStats();
-  }, []);
-
-  /* =========================
-     تشغيل / إيقاف الاتصال
-     Backend:
-     POST /api/courier/online
-  ========================= */
-
-  const toggleOnline = async () => {
-    const next = !online;
-
-    if (!approved) {
-      toast(
-        "حساب المندوب غير معتمد من الإدارة",
-        "error"
-      );
-      return;
-    }
-
-    try {
-      const response = await api<{
-        user?: {
-          approved: boolean | number;
-          online: boolean | number;
-        };
-      }>("/courier/online", {
-        method: "POST",
-        body: JSON.stringify({
-          online: next,
-        }),
-      });
-
-      setOnline(next);
-
-      if (response.user) {
-        setApproved(
-          response.user.approved === true ||
-            Number(response.user.approved) === 1
-        );
-
-        setOnline(
-          response.user.online === true ||
-            Number(response.user.online) === 1
-        );
-      }
-
-      toast(
-        next
-          ? "أنت الآن متصل"
-          : "أنت الآن غير متصل",
-        "success"
-      );
-    } catch (e) {
-      toast(
-        e instanceof Error
-          ? e.message
-          : "حدث خطأ أثناء تغيير حالة الاتصال",
-        "error"
-      );
-    }
-  };
-
-  /* =========================
-     إرسال الموقع
-     Backend:
-     POST /api/courier/location
-  ========================= */
-
-  useEffect(() => {
-    if (!online) {
-      stopWatchRef.current?.();
-      stopWatchRef.current = null;
-      return;
-    }
-
-    stopWatchRef.current = watchPosition(
-      (coords) => {
-        const now = Date.now();
-
-        if (
-          now - lastSentRef.current <
-          LOCATION_SEND_INTERVAL_MS
-        ) {
-          return;
-        }
-
-        lastSentRef.current = now;
-
-        api("/courier/location", {
-          method: "POST",
-          body: JSON.stringify(coords),
-        }).catch(() => {});
-      },
-      (err) => {
-        toast(
-          err.message,
-          "error"
-        );
-      }
-    );
-
-    return () => {
-      stopWatchRef.current?.();
-      stopWatchRef.current = null;
-    };
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [online]);
-
-  /* =========================
-     إجراءات الطلب
-  ========================= */
-
-  const handleAction = async (
-    orderId: string,
-    action:
-      | "accept"
-      | "pickup"
-      | "deliver"
-      | "unassign"
-  ) => {
-    try {
-      await api(
-        `/orders/${orderId}/${action}`,
-        {
-          method: "POST",
-        }
-      );
-
-      toast(
-        "تم تحديث حالة الطلب بنجاح",
-        "success"
-      );
-
-      await fetchOrders();
-      await fetchStats();
-      await fetchMe();
-    } catch (e) {
-      toast(
-        e instanceof Error
-          ? e.message
-          : "حدث خطأ ما",
-        "error"
-      );
-    }
-  };
-
-  const availableOrders =
-    orders.filter(
-      (o) =>
-        o.status === "pending"
-    );
-
-  const myOrders =
-    orders.filter(
-      (o) =>
-        o.status !== "pending"
-    );
-
-  const currentDebt =
-    Number(
-      stats?.debt ?? 0
-    );
-
-  /*
-   * Backend earnings = إجمالي قيمة
-   * الطلبات المكتملة.
-   *
-   * حسب نظام وصلي:
-   * عمولة التطبيق = 20%
-   * أرباح المندوب = 80%
-   */
-  const totalRevenue =
-    Number(
-      stats?.earnings ?? 0
-    );
-
-  const appCommission =
-    Math.round(
-      totalRevenue * 0.2 * 100
-    ) / 100;
-
-  const courierEarnings =
-    Math.round(
-      totalRevenue * 0.8 * 100
-    ) / 100;
+  const extraDistance = Math.max(
+    0,
+    Math.ceil(distanceKm - baseDistance)
+  );
 
   return (
-    <div className="min-h-screen bg-gray-50 dir-rtl p-4 font-sans">
-
-      {/* Header */}
-      <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm mb-4">
-        <div>
-          <h1 className="text-xl font-bold text-gray-800">
-            مرحباً المندوب {user.name}
-          </h1>
-
-          <p className="text-sm text-gray-500">
-            لوحة التحكم وإدارة الطلبات
-          </p>
-        </div>
-
-        <button
-          onClick={onLogout}
-          className="bg-red-50 text-red-600 px-3 py-1.5 rounded-lg text-sm font-medium"
-        >
-          تأكيد الخروج
-        </button>
-      </div>
-
-      {/* حالة الاعتماد */}
-      {approved === false && (
-        <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 mb-4 text-center text-sm font-bold">
-          ⏳ حسابك بانتظار اعتماد الإدارة — لن تتمكن من قبول الطلبات حتى تتم الموافقة
-        </div>
-      )}
-
-      {approved === true && (
-        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl p-3 mb-4 text-center text-sm font-bold">
-          ✅ حسابك معتمد من الإدارة
-        </div>
-      )}
-
-      {/* الاتصال */}
-      <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm mb-4">
-        <div>
-          <p className="font-bold text-gray-800">
-            حالتك
-          </p>
-
-          <p className="text-sm text-gray-500">
-            {online
-              ? "متصل — تظهر لك الطلبات القريبة"
-              : "غير متصل"}
-          </p>
-        </div>
-
-        <button
-          onClick={toggleOnline}
-          disabled={approved !== true}
-          className={`px-5 py-2 rounded-full font-bold text-sm transition disabled:opacity-40 ${
-            online
-              ? "bg-emerald-600 text-white"
-              : "bg-gray-200 text-gray-600"
-          }`}
-        >
-          {online
-            ? "متصل ●"
-            : "غير متصل"}
-        </button>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex gap-2 mb-4 bg-gray-200 p-1 rounded-xl">
-
-        <button
-          onClick={() =>
-            setActiveTab("available")
-          }
-          className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${
-            activeTab === "available"
-              ? "bg-white text-emerald-600 shadow-sm"
-              : "text-gray-600"
-          }`}
-        >
-          الطلبات المتاحة (
-          {availableOrders.length})
-        </button>
-
-        <button
-          onClick={() =>
-            setActiveTab("my_orders")
-          }
-          className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${
-            activeTab === "my_orders"
-              ? "bg-white text-emerald-600 shadow-sm"
-              : "text-gray-600"
-          }`}
-        >
-          طلباتي الحالية (
-          {myOrders.length})
-        </button>
-
-        <button
-          onClick={() =>
-            setActiveTab("stats")
-          }
-          className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${
-            activeTab === "stats"
-              ? "bg-white text-emerald-600 shadow-sm"
-              : "text-gray-600"
-          }`}
-        >
-          الأرباح والعمولة 💰
-        </button>
-
-      </div>
-
-      {/* Content */}
-      {loading ? (
-        <div className="text-center py-10 text-gray-500">
-          جاري التحميل...
-        </div>
-      ) : activeTab === "stats" ? (
-
-        /* =========================
-           الأرباح والعمولة
-        ========================= */
-
-        <div className="space-y-4">
-
-          <div className="grid grid-cols-2 gap-3">
-
-            {/* أرباح المندوب */}
-            <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-xl text-center">
-
-              <span className="text-xs text-emerald-700 font-bold block">
-                صافي أرباحك (80%)
-              </span>
-
-              <span className="text-2xl font-black text-emerald-700">
-                {courierEarnings.toFixed(2)} دج
-              </span>
-
-            </div>
-
-            {/* عمولة التطبيق */}
-            <div className="bg-red-50 border border-red-200 p-4 rounded-xl text-center">
-
-              <span className="text-xs text-red-700 font-bold block">
-                عمولة التطبيق (20%)
-              </span>
-
-              <span className="text-2xl font-black text-red-700">
-                {appCommission.toFixed(2)} دج
-              </span>
-
-            </div>
-
-          </div>
-
-          {/* الدين الحالي */}
-          <div
-            className={`p-5 rounded-xl shadow-sm border text-center ${
-              currentDebt > 0
-                ? "bg-red-50 border-red-300"
-                : "bg-emerald-50 border-emerald-300"
-            }`}
-          >
-
-            <span
-              className={`text-sm font-bold block ${
-                currentDebt > 0
-                  ? "text-red-700"
-                  : "text-emerald-700"
-              }`}
-            >
-              💳 المبلغ الواجب دفعه للتطبيق
-            </span>
-
-            <span
-              className={`text-3xl font-black block mt-2 ${
-                currentDebt > 0
-                  ? "text-red-700"
-                  : "text-emerald-700"
-              }`}
-            >
-              {currentDebt.toFixed(2)} دج
-            </span>
-
-            <span
-              className={`text-xs block mt-2 ${
-                currentDebt > 0
-                  ? "text-red-600"
-                  : "text-emerald-600"
-              }`}
-            >
-              {currentDebt > 0
-                ? "هذا هو إجمالي العمولة المستحقة عليك للتطبيق"
-                : "لا يوجد مبلغ مستحق عليك حالياً"}
-            </span>
-
-          </div>
-
-          {/* إجمالي الطلبات المكتملة */}
-          <div className="bg-white p-4 rounded-xl shadow-sm text-center border">
-
-            <span className="text-xs text-gray-500 font-bold block">
-              إجمالي مبالغ الطلبات المكتملة
-            </span>
-
-            <span className="text-xl font-bold text-gray-800">
-              {totalRevenue.toFixed(2)} دج
-            </span>
-
-            <span className="text-xs text-gray-400 block mt-1">
-              عدد الطلبات المكتملة:{" "}
-              {stats?.completed ?? 0}
-            </span>
-
-          </div>
-
-        </div>
-
-      ) : (
-
-        /* =========================
-           الطلبات
-        ========================= */
-
-        <div className="space-y-3">
-
-          {(activeTab === "available"
-            ? availableOrders
-            : myOrders
-          ).map((order) => (
-
-            <div
-              key={order.id}
-              className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 space-y-3"
-            >
-
-              <div className="flex justify-between items-start">
-
-                <span className="text-xs font-bold text-gray-400">
-                  مسافة {order.distance_km} كم
-                </span>
-
-                <span className="bg-emerald-100 text-emerald-800 font-black px-3 py-1 rounded-full text-sm">
-                  {order.final_price} دج
-                </span>
-
-              </div>
-
-              {/* تفاصيل المكان */}
-              <div className="text-sm space-y-1">
-
-                <p>
-                  <span className="font-bold text-gray-500">
-                    📍 من:
-                  </span>{" "}
-                  {order.pickup_address}
-                </p>
-
-                <p>
-                  <span className="font-bold text-gray-500">
-                    🏁 إلى:
-                  </span>{" "}
-                  {order.delivery_address}
-                </p>
-
-              </div>
-
-              {/* تفاصيل الطلب */}
-              <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 space-y-1">
-
-                <p className="text-xs text-gray-500 font-bold">
-                  📝 وصف الشحنة / تفاصيل الطلب:
-                </p>
-
-                <p className="text-sm font-semibold text-gray-800">
-                  {order.package_description ||
-                    "لا يوجد وصف محدد"}
-                </p>
-
-                {order.notes && (
-                  <p className="text-xs text-amber-700 mt-1 font-medium">
-                    ⚠️ ملاحظات:{" "}
-                    {order.notes}
-                  </p>
-                )}
-
-                {order.recipient_phone && (
-                  <p className="text-xs text-blue-600 font-medium">
-                    📞 هاتف المستلم:{" "}
-                    {order.recipient_phone}
-                  </p>
-                )}
-
-              </div>
-
-              {/* أزرار الإجراءات */}
-              <div className="pt-2 flex gap-2">
-
-                {order.status === "pending" && (
-                  <button
-                    onClick={() =>
-                      handleAction(
-                        order.id,
-                        "accept"
-                      )
-                    }
-                    disabled={
-                      approved !== true
-                    }
-                    className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-emerald-700 disabled:opacity-40"
-                  >
-                    قبول الطلب
-                  </button>
-                )}
-
-                {order.status === "accepted" && (
-                  <>
-                    <button
-                      onClick={() =>
-                        handleAction(
-                          order.id,
-                          "pickup"
-                        )
-                      }
-                      className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-bold text-sm"
-                    >
-                      تم استلام الشحنة
-                    </button>
-
-                    <button
-                      onClick={() =>
-                        handleAction(
-                          order.id,
-                          "unassign"
-                        )
-                      }
-                      className="bg-red-50 text-red-600 px-3 py-2 rounded-lg font-bold text-sm border border-red-200"
-                    >
-                      إلغاء التكليف
-                    </button>
-                  </>
-                )}
-
-                {order.status === "picked_up" && (
-                  <button
-                    onClick={() =>
-                      handleAction(
-                        order.id,
-                        "deliver"
-                      )
-                    }
-                    className="w-full bg-emerald-600 text-white py-2 rounded-lg font-bold text-sm"
-                  >
-                    تم التوصيل للزبون
-                  </button>
-                )}
-
-                {order.status === "completed" && (
-                  <span className="w-full text-center text-xs font-bold text-emerald-600 bg-emerald-50 py-2 rounded-lg">
-                    ✅ تم التسليم بنجاح
-                  </span>
-                )}
-
-                {/* دعم الطلبات القديمة */}
-                {order.status === "delivered" && (
-                  <span className="w-full text-center text-xs font-bold text-emerald-600 bg-emerald-50 py-2 rounded-lg">
-                    ✅ تم التسليم بنجاح
-                  </span>
-                )}
-
-              </div>
-
-            </div>
-
-          ))}
-
-        </div>
-      )}
-
-    </div>
+    basePrice +
+    extraDistance * extraKmPrice
   );
 }
+
+function sanitizeForCourier(
+  order: any
+) {
+  const copy = { ...order };
+
+  delete copy.confirmation_code;
+
+  return copy;
+}
+
+async function recordStatus(
+  orderId: string,
+  status: string
+) {
+  await pool.query(
+    `INSERT INTO order_status_history
+     (id, order_id, status, created_at)
+     VALUES ($1,$2,$3,$4)`,
+    [
+      id(),
+      orderId,
+      status,
+      new Date().toISOString(),
+    ]
+  );
+}
+
+async function attachCourierInfo(
+  order: any
+) {
+  if (!order.courier_id) {
+    return order;
+  }
+
+  const result = await pool.query(
+    `SELECT
+       id,
+       name,
+       phone,
+       online,
+       lat,
+       lng,
+       location_updated_at
+     FROM users
+     WHERE id=$1
+       AND role='courier'`,
+    [order.courier_id]
+  );
+
+  if (!result.rows.length) {
+    return order;
+  }
+
+  return {
+    ...order,
+    courier: result.rows[0],
+  };
+}
+
+/* =========================
+   OLD DELIVERED ORDERS
+   تحويل الطلبات القديمة التي
+   بقيت delivered إلى completed
+   وحساب العمولة مرة واحدة
+========================= */
+
+async function migrateOldDeliveredOrders() {
+  const markerKey =
+    "courier_delivered_migration_v1";
+
+  try {
+    const marker =
+      await pool.query(
+        `SELECT value
+         FROM settings
+         WHERE key=$1
+         LIMIT 1`,
+        [markerKey]
+      );
+
+    if (marker.rows.length) {
+      return;
+    }
+
+    const settings =
+      await getSettings();
+
+    const commissionPercent =
+      Number(
+        settings.commission_percent ??
+          20
+      );
+
+    const delivered =
+      await pool.query(
+        `SELECT
+           id,
+           courier_id,
+           final_price
+         FROM orders
+         WHERE status='delivered'
+           AND courier_id IS NOT NULL
+           AND final_price IS NOT NULL`
+      );
+
+    for (const order of delivered.rows) {
+      const client =
+        await pool.connect();
+
+      try {
+        await client.query(
+          "BEGIN"
+        );
+
+        const locked =
+          await client.query(
+            `SELECT
+               id,
+               courier_id,
+               final_price,
+               status
+             FROM orders
+             WHERE id=$1
+             FOR UPDATE`,
+            [order.id]
+          );
+
+        if (
+          !locked.rows.length ||
+          locked.rows[0].status !==
+            "delivered"
+        ) {
+          await client.query(
+            "ROLLBACK"
+          );
+          client.release();
+          continue;
+        }
+
+        const courierId =
+          locked.rows[0].courier_id;
+
+        const finalPrice =
+          Number(
+            locked.rows[0].final_price ||
+              0
+          );
+
+        if (
+          courierId &&
+          finalPrice > 0
+        ) {
+          const commission =
+            Math.round(
+              (
+                (finalPrice *
+                  commissionPercent) /
+                100
+              ) * 100
+            ) / 100;
+
+          if (commission > 0) {
+            await client.query(
+              `UPDATE users
+               SET
+                 courier_debt =
+                   COALESCE(
+                     courier_debt,
+                     0
+                   ) + $1
+               WHERE id=$2
+                 AND role='courier'`,
+              [
+                commission,
+                courierId,
+              ]
+            );
+          }
+        }
+
+        const now =
+          new Date().toISOString();
+
+        const completed =
+          await client.query(
+            `UPDATE orders
+             SET
+               status='completed',
+               updated_at=$1
+             WHERE id=$2
+               AND status='delivered'
+             RETURNING *`,
+            [
+              now,
+              order.id,
+            ]
+          );
+
+        if (completed.rows.length) {
+          await client.query(
+            `INSERT INTO order_status_history
+             (id, order_id, status, created_at)
+             VALUES ($1,$2,$3,$4)`,
+            [
+              id(),
+              order.id,
+              "completed",
+              now,
+            ]
+          );
+        }
+
+        await client.query(
+          "COMMIT"
+        );
+      } catch (error) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        console.error(
+          "old delivered migration error:",
+          error
+        );
+      } finally {
+        client.release();
+      }
+    }
+
+    await pool.query(
+      `INSERT INTO settings
+       (key,value)
+       VALUES ($1,$2)
+       ON CONFLICT(key)
+       DO NOTHING`,
+      [
+        markerKey,
+        "1",
+      ]
+    );
+
+    console.log(
+      `Old delivered orders migration completed: ${delivered.rows.length}`
+    );
+  } catch (error) {
+    console.error(
+      "old delivered orders migration failed:",
+      error
+    );
+  }
+}
+
+/* =========================
+   AUTH
+========================= */
+
+app.post(
+  "/api/auth/register",
+  async (req, res) => {
+    try {
+      const {
+        name,
+        phone,
+        password,
+        role: requestedRole,
+        idCard,
+      } = req.body;
+
+      if (
+        !name ||
+        !phone ||
+        !password ||
+        !requestedRole
+      ) {
+        return res.status(400).json({
+          error:
+            "الاسم ورقم الهاتف وكلمة المرور مطلوبة",
+        });
+      }
+
+      if (
+        !["customer", "courier"].includes(
+          requestedRole
+        )
+      ) {
+        return res.status(400).json({
+          error: "نوع الحساب غير صالح",
+        });
+      }
+
+      const normalizedPhone =
+        String(phone).trim();
+
+      if (password.length < 6) {
+        return res.status(400).json({
+          error:
+            "كلمة المرور يجب أن تكون 6 أحرف على الأقل",
+        });
+      }
+
+      if (
+        requestedRole === "courier" &&
+        (!idCard ||
+          !idCard.data ||
+          !idCard.mime)
+      ) {
+        return res.status(400).json({
+          error:
+            "بطاقة التعريف مطلوبة للمندوب",
+        });
+      }
+
+      const existing =
+        await pool.query(
+          `SELECT id
+           FROM users
+           WHERE phone=$1
+           LIMIT 1`,
+          [normalizedPhone]
+        );
+
+      if (existing.rows.length) {
+        return res.status(409).json({
+          error:
+            "رقم الهاتف مسجل مسبقًا",
+        });
+      }
+
+      const passwordHash =
+        await bcrypt.hash(
+          password,
+          10
+        );
+
+      const userId = id();
+
+      let cardData: Buffer | null =
+        null;
+
+      let cardMime: string | null =
+        null;
+
+      if (
+        requestedRole === "courier"
+      ) {
+        try {
+          cardData = Buffer.from(
+            idCard.data,
+            "base64"
+          );
+
+          cardMime = String(
+            idCard.mime
+          );
+        } catch {
+          return res.status(400).json({
+            error:
+              "صورة بطاقة التعريف غير صالحة",
+          });
+        }
+      }
+
+      const approved =
+        requestedRole === "customer"
+          ? 1
+          : 0;
+
+      const result =
+        await pool.query(
+          `INSERT INTO users
+           (
+             id,
+             name,
+             email,
+             phone,
+             password_hash,
+             role,
+             created_at,
+             online,
+             approved,
+             id_card_data,
+             id_card_mime,
+             courier_debt
+           )
+           VALUES
+           (
+             $1,$2,$3,$4,$5,$6,$7,
+             0,$8,$9,$10,0
+           )
+           RETURNING
+             id,
+             name,
+             email,
+             phone,
+             role`,
+          [
+            userId,
+            String(name).trim(),
+            null,
+            normalizedPhone,
+            passwordHash,
+            requestedRole,
+            new Date().toISOString(),
+            approved,
+            cardData,
+            cardMime,
+          ]
+        );
+
+      const user = result.rows[0];
+
+      const token = sign({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      });
+
+      return res.status(201).json({
+        token,
+        user,
+      });
+    } catch (error) {
+      console.error(
+        "register error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء إنشاء الحساب",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/auth/login",
+  async (req, res) => {
+    try {
+      const {
+        phone,
+        password,
+      } = req.body;
+
+      if (!phone || !password) {
+        return res.status(400).json({
+          error:
+            "رقم الهاتف وكلمة المرور مطلوبان",
+        });
+      }
+
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             email,
+             phone,
+             password_hash,
+             role,
+             approved
+           FROM users
+           WHERE phone=$1
+           LIMIT 1`,
+          [String(phone).trim()]
+        );
+
+      if (!result.rows.length) {
+        return res.status(401).json({
+          error:
+            "بيانات الدخول غير صحيحة",
+        });
+      }
+
+      const user = result.rows[0];
+
+      const valid =
+        await bcrypt.compare(
+          password,
+          user.password_hash
+        );
+
+      if (!valid) {
+        return res.status(401).json({
+          error:
+            "بيانات الدخول غير صحيحة",
+        });
+      }
+
+      if (
+        user.role === "courier" &&
+        Number(user.approved) !== 1
+      ) {
+        return res.status(403).json({
+          error:
+            "حساب المندوب في انتظار موافقة الإدارة",
+        });
+      }
+
+      const token = sign({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      });
+
+      return res.json({
+        token,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          role: user.role,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "login error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء تسجيل الدخول",
+      });
+    }
+  }
+);
+
+app.get(
+  "/api/auth/me",
+  auth,
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             email,
+             phone,
+             role,
+             approved,
+             online,
+             COALESCE(
+               courier_debt,
+               0
+             ) AS courier_debt
+           FROM users
+           WHERE id=$1`,
+          [req.user!.id]
+        );
+
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "المستخدم غير موجود",
+        });
+      }
+
+      return res.json({
+        user: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "me error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+/* =========================
+   COURIER
+========================= */
+
+app.post(
+  "/api/courier/online",
+  auth,
+  role("courier"),
+  async (req, res) => {
+    try {
+      const { online } = req.body;
+
+      const result =
+        await pool.query(
+          `UPDATE users
+           SET online=$1
+           WHERE id=$2
+             AND role='courier'
+           RETURNING
+             id,
+             name,
+             phone,
+             role,
+             approved,
+             online`,
+          [
+            Boolean(online),
+            req.user!.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "المندوب غير موجود",
+        });
+      }
+
+      return res.json({
+        user: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "courier online error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/courier/location",
+  auth,
+  role("courier"),
+  async (req, res) => {
+    try {
+      const {
+        lat,
+        lng,
+      } = req.body;
+
+      if (
+        lat === undefined ||
+        lng === undefined
+      ) {
+        return res.status(400).json({
+          error:
+            "الموقع غير صالح",
+        });
+      }
+
+      const latitude =
+        Number(lat);
+
+      const longitude =
+        Number(lng);
+
+      if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+      ) {
+        return res.status(400).json({
+          error:
+            "الموقع غير صالح",
+        });
+      }
+
+      const result =
+        await pool.query(
+          `UPDATE users
+           SET
+             lat=$1,
+             lng=$2,
+             location_updated_at=$3
+           WHERE id=$4
+             AND role='courier'
+           RETURNING
+             id,
+             lat,
+             lng,
+             location_updated_at`,
+          [
+            latitude,
+            longitude,
+            new Date().toISOString(),
+            req.user!.id,
+          ]
+        );
+
+      return res.json({
+        location:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "courier location error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+app.get(
+  "/api/courier/stats",
+  auth,
+  role("courier"),
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             COUNT(*) FILTER (
+               WHERE status='completed'
+             ) AS completed,
+             COUNT(*) FILTER (
+               WHERE status NOT IN
+               ('completed','cancelled')
+             ) AS active,
+             COALESCE(
+               SUM(
+                 CASE
+                   WHEN status='completed'
+                   THEN final_price
+                   ELSE 0
+                 END
+               ),
+               0
+             ) AS earnings
+           FROM orders
+           WHERE courier_id=$1`,
+          [req.user!.id]
+        );
+
+      const debt =
+        await pool.query(
+          `SELECT
+             COALESCE(
+               courier_debt,
+               0
+             ) AS debt
+           FROM users
+           WHERE id=$1`,
+          [req.user!.id]
+        );
+
+      return res.json({
+        stats: {
+          completed:
+            Number(
+              result.rows[0]?.completed ||
+                0
+            ),
+          active:
+            Number(
+              result.rows[0]?.active ||
+                0
+            ),
+          earnings:
+            Number(
+              result.rows[0]?.earnings ||
+                0
+            ),
+          debt:
+            Number(
+              debt.rows[0]?.debt ||
+                0
+            ),
+        },
+      });
+    } catch (error) {
+      console.error(
+        "courier stats error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+/* =========================
+   ORDERS
+========================= */
+
+app.get(
+  "/api/orders",
+  auth,
+  async (req, res) => {
+    try {
+      let result;
+
+      if (
+        req.user!.role ===
+        "customer"
+      ) {
+        result =
+          await pool.query(
+            `SELECT *
+             FROM orders
+             WHERE customer_id=$1
+             ORDER BY created_at DESC`,
+            [req.user!.id]
+          );
+      } else if (
+        req.user!.role ===
+        "courier"
+      ) {
+        result =
+          await pool.query(
+            `SELECT *
+             FROM orders
+             WHERE
+               courier_id=$1
+               OR (
+                 status='pending'
+                 AND courier_id IS NULL
+               )
+             ORDER BY created_at DESC`,
+            [req.user!.id]
+          );
+      } else {
+        result =
+          await pool.query(
+            `SELECT *
+             FROM orders
+             ORDER BY created_at DESC`
+          );
+      }
+
+      const orders = [];
+
+      for (const order of result.rows) {
+        let item =
+          await attachCourierInfo(
+            order
+          );
+
+        if (
+          req.user!.role ===
+          "courier"
+        ) {
+          item =
+            sanitizeForCourier(
+              item
+            );
+        }
+
+        orders.push(item);
+      }
+
+      return res.json({
+        orders,
+      });
+    } catch (error) {
+      console.error(
+        "orders get error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب الطلبات",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/orders",
+  auth,
+  role("customer"),
+  async (req, res) => {
+    try {
+      const {
+        pickup_address,
+        delivery_address,
+        pickup_lat,
+        pickup_lng,
+        delivery_lat,
+        delivery_lng,
+        distance_km,
+        package_description,
+        notes,
+        offered_price,
+      } = req.body;
+
+      if (
+        !pickup_address ||
+        !delivery_address
+      ) {
+        return res.status(400).json({
+          error:
+            "عنوان الاستلام والتوصيل مطلوبان",
+        });
+      }
+
+      const distance =
+        Number(distance_km);
+
+      if (
+        !Number.isFinite(
+          distance
+        ) ||
+        distance <= 0
+      ) {
+        return res.status(400).json({
+          error:
+            "المسافة غير صالحة",
+        });
+      }
+
+      const finalPrice =
+        Number.isFinite(
+          Number(offered_price)
+        ) &&
+        Number(offered_price) > 0
+          ? Number(offered_price)
+          : await calcPrice(
+              distance
+            );
+
+      const customer =
+        await pool.query(
+          `SELECT phone
+           FROM users
+           WHERE id=$1`,
+          [req.user!.id]
+        );
+
+      const recipientPhone =
+        customer.rows[0]?.phone ||
+        null;
+
+      const orderId = id();
+
+      const now =
+        new Date().toISOString();
+
+      const result =
+        await pool.query(
+          `INSERT INTO orders
+           (
+             id,
+             customer_id,
+             courier_id,
+             pickup_address,
+             delivery_address,
+             pickup_lat,
+             pickup_lng,
+             delivery_lat,
+             delivery_lng,
+             distance_km,
+             package_description,
+             recipient_phone,
+             notes,
+             offered_price,
+             final_price,
+             status,
+             confirmation_code,
+             created_at,
+             updated_at
+           )
+           VALUES
+           (
+             $1,$2,NULL,$3,$4,
+             $5,$6,$7,$8,$9,
+             $10,$11,$12,$13,$14,
+             'pending',NULL,$15,$15
+           )
+           RETURNING *`,
+          [
+            orderId,
+            req.user!.id,
+            pickup_address,
+            delivery_address,
+            pickup_lat ??
+              null,
+            pickup_lng ??
+              null,
+            delivery_lat ??
+              null,
+            delivery_lng ??
+              null,
+            distance,
+            package_description ??
+              null,
+            recipientPhone,
+            notes ?? null,
+            offered_price ??
+              null,
+            finalPrice,
+            now,
+          ]
+        );
+
+      await recordStatus(
+        orderId,
+        "pending"
+      );
+
+      return res.status(201).json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "order create error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء إنشاء الطلب",
+      });
+    }
+  }
+);
+
+/* =========================
+   ACCEPT ORDER
+========================= */
+
+app.post(
+  "/api/orders/:id/accept",
+  auth,
+  role("courier"),
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `UPDATE orders
+           SET
+             courier_id=$1,
+             status='accepted',
+             updated_at=$2
+           WHERE id=$3
+             AND status='pending'
+             AND courier_id IS NULL
+           RETURNING *`,
+          [
+            req.user!.id,
+            new Date().toISOString(),
+            req.params.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(409).json({
+          error:
+            "الطلب لم يعد متاحًا",
+        });
+      }
+
+      await recordStatus(
+        req.params.id,
+        "accepted"
+      );
+
+      return res.json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "accept error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+/* =========================
+   PICKUP
+========================= */
+
+app.post(
+  "/api/orders/:id/pickup",
+  auth,
+  role("courier"),
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `UPDATE orders
+           SET
+             status='picked_up',
+             updated_at=$1
+           WHERE id=$2
+             AND courier_id=$3
+             AND status='accepted'
+           RETURNING *`,
+          [
+            new Date().toISOString(),
+            req.params.id,
+            req.user!.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(409).json({
+          error:
+            "لا يمكن استلام هذا الطلب الآن",
+        });
+      }
+
+      await recordStatus(
+        req.params.id,
+        "picked_up"
+      );
+
+      return res.json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "pickup error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+/* =========================
+   DELIVER
+   التوصيل = إكمال الطلب
+   + حساب العمولة مباشرة
+   + إضافة الدين للمندوب
+========================= */
+
+app.post(
+  "/api/orders/:id/deliver",
+  auth,
+  role("courier"),
+  async (req, res) => {
+    const client =
+      await pool.connect();
+
+    try {
+      await client.query(
+        "BEGIN"
+      );
+
+      const orderResult =
+        await client.query(
+          `SELECT *
+           FROM orders
+           WHERE id=$1
+             AND courier_id=$2
+             AND status='picked_up'
+           FOR UPDATE`,
+          [
+            req.params.id,
+            req.user!.id,
+          ]
+        );
+
+      if (
+        !orderResult.rows.length
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(409).json({
+          error:
+            "لا يمكن إنهاء التوصيل الآن",
+        });
+      }
+
+      const order =
+        orderResult.rows[0];
+
+      const settings =
+        await getSettings();
+
+      const commissionPercent =
+        Number(
+          settings.commission_percent ??
+            20
+        );
+
+      const finalPrice =
+        Number(
+          order.final_price || 0
+        );
+
+      const commission =
+        Math.round(
+          (
+            (finalPrice *
+              commissionPercent) /
+            100
+          ) * 100
+        ) / 100;
+
+      const now =
+        new Date().toISOString();
+
+      const completed =
+        await client.query(
+          `UPDATE orders
+           SET
+             status='completed',
+             updated_at=$1
+           WHERE id=$2
+             AND courier_id=$3
+             AND status='picked_up'
+           RETURNING *`,
+          [
+            now,
+            req.params.id,
+            req.user!.id,
+          ]
+        );
+
+      if (
+        !completed.rows.length
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(409).json({
+          error:
+            "تعذر إكمال الطلب",
+        });
+      }
+
+      /*
+       * نسجل مرحلتي التسليم والإكمال.
+       * الطلب أصبح completed مباشرة.
+       */
+
+      await client.query(
+        `INSERT INTO order_status_history
+         (id, order_id, status, created_at)
+         VALUES ($1,$2,$3,$4)`,
+        [
+          id(),
+          req.params.id,
+          "delivered",
+          now,
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO order_status_history
+         (id, order_id, status, created_at)
+         VALUES ($1,$2,$3,$4)`,
+        [
+          id(),
+          req.params.id,
+          "completed",
+          now,
+        ]
+      );
+
+      if (commission > 0) {
+        await client.query(
+          `UPDATE users
+           SET
+             courier_debt =
+               COALESCE(
+                 courier_debt,
+                 0
+               ) + $1
+           WHERE id=$2
+             AND role='courier'`,
+          [
+            commission,
+            req.user!.id,
+          ]
+        );
+      }
+
+      const debtResult =
+        await client.query(
+          `SELECT
+             COALESCE(
+               courier_debt,
+               0
+             ) AS courier_debt
+           FROM users
+           WHERE id=$1
+             AND role='courier'`,
+          [req.user!.id]
+        );
+
+      await client.query(
+        "COMMIT"
+      );
+
+      return res.json({
+        order:
+          completed.rows[0],
+        commission,
+        courier_debt:
+          Number(
+            debtResult.rows[0]
+              ?.courier_debt || 0
+          ),
+      });
+    } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {
+        // ignore rollback error
+      }
+
+      console.error(
+        "deliver error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء إنهاء التوصيل وحساب العمولة",
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+/* =========================
+   CANCEL
+========================= */
+
+app.post(
+  "/api/orders/:id/cancel",
+  auth,
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `UPDATE orders
+           SET
+             status='cancelled',
+             updated_at=$1
+           WHERE id=$2
+             AND (
+               customer_id=$3
+               OR courier_id=$3
+             )
+             AND status NOT IN
+             ('completed','cancelled')
+           RETURNING *`,
+          [
+            new Date().toISOString(),
+            req.params.id,
+            req.user!.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(409).json({
+          error:
+            "لا يمكن إلغاء هذا الطلب",
+        });
+      }
+
+      await recordStatus(
+        req.params.id,
+        "cancelled"
+      );
+
+      return res.json({
+        order: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "cancel error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+/* =========================
+   RATING
+   التقييم اختياري ولا يحسب
+   العمولة ولا يكمل الطلب
+========================= */
+
+app.post(
+  "/api/orders/:id/rating",
+  auth,
+  role("customer"),
+  async (req, res) => {
+    try {
+      const {
+        stars,
+        comment,
+      } = req.body;
+
+      const rating =
+        Number(stars);
+
+      if (
+        !Number.isInteger(
+          rating
+        ) ||
+        rating < 1 ||
+        rating > 5
+      ) {
+        return res.status(400).json({
+          error:
+            "التقييم يجب أن يكون من 1 إلى 5",
+        });
+      }
+
+      const orderResult =
+        await pool.query(
+          `SELECT *
+           FROM orders
+           WHERE id=$1
+             AND customer_id=$2`,
+          [
+            req.params.id,
+            req.user!.id,
+          ]
+        );
+
+      if (
+        !orderResult.rows.length
+      ) {
+        return res.status(404).json({
+          error:
+            "الطلب غير موجود",
+        });
+      }
+
+      const order =
+        orderResult.rows[0];
+
+      /*
+       * بعد التعديل الطلب يصبح completed
+       * مباشرة عند ضغط المندوب على تم التوصيل.
+       *
+       * نسمح أيضًا بـ delivered للطلبات
+       * القديمة التي ربما لم تتم هجرتها بعد.
+       */
+
+      if (
+        order.status !==
+          "completed" &&
+        order.status !==
+          "delivered"
+      ) {
+        return res.status(400).json({
+          error:
+            "يمكن تقييم الطلب بعد اكتمال التوصيل",
+        });
+      }
+
+      if (!order.courier_id) {
+        return res.status(400).json({
+          error:
+            "لا يوجد مندوب لهذا الطلب",
+        });
+      }
+
+      const oldRating =
+        await pool.query(
+          `SELECT id
+           FROM ratings
+           WHERE order_id=$1
+           LIMIT 1`,
+          [req.params.id]
+        );
+
+      if (oldRating.rows.length) {
+        return res.status(409).json({
+          error:
+            "تم تقييم هذا الطلب مسبقًا",
+        });
+      }
+
+      const ratingResult =
+        await pool.query(
+          `INSERT INTO ratings
+           (
+             id,
+             order_id,
+             customer_id,
+             courier_id,
+             stars,
+             comment,
+             created_at
+           )
+           VALUES
+           ($1,$2,$3,$4,$5,$6,$7)
+           RETURNING *`,
+          [
+            id(),
+            req.params.id,
+            req.user!.id,
+            order.courier_id,
+            rating,
+            comment ??
+              null,
+            new Date().toISOString(),
+          ]
+        );
+
+      /*
+       * مهم:
+       * لا نحسب العمولة هنا.
+       * لا نضيف دينًا هنا.
+       * لا نغير حالة الطلب هنا.
+       *
+       * العمولة والدين تم حسابهما عند
+       * ضغط المندوب على "تم التوصيل".
+       */
+
+      return res.json({
+        order,
+        rating:
+          ratingResult.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "rating error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء تسجيل التقييم",
+      });
+    }
+  }
+);
+
+/* =========================
+   COMPLAINTS
+========================= */
+
+app.post(
+  "/api/complaints",
+  auth,
+  async (req, res) => {
+    try {
+      const {
+        order_id,
+        message,
+      } = req.body;
+
+      if (!message) {
+        return res.status(400).json({
+          error:
+            "الشكوى مطلوبة",
+        });
+      }
+
+      const now =
+        new Date().toISOString();
+
+      const result =
+        await pool.query(
+          `INSERT INTO complaints
+           (
+             id,
+             order_id,
+             user_id,
+             message,
+             status,
+             response,
+             created_at,
+             updated_at
+           )
+           VALUES
+           (
+             $1,$2,$3,$4,
+             'pending',
+             NULL,$5,$5
+           )
+           RETURNING *`,
+          [
+            id(),
+            order_id ??
+              null,
+            req.user!.id,
+            message,
+            now,
+          ]
+        );
+
+      return res.status(201).json({
+        complaint:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "complaint error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء إرسال الشكوى",
+      });
+    }
+  }
+);
+
+/* =========================
+   ADMIN - USERS
+========================= */
+
+app.get(
+  "/api/admin/users",
+  auth,
+  role("admin"),
+  async (_req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             email,
+             phone,
+             role,
+             approved,
+             online,
+             created_at
+           FROM users
+           ORDER BY created_at DESC`
+        );
+
+      return res.json({
+        users:
+          result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "admin users error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب المستخدمين",
+      });
+    }
+  }
+);
+
+/* =========================
+   ADMIN - COURIERS
+========================= */
+
+app.get(
+  "/api/admin/couriers",
+  auth,
+  role("admin"),
+  async (_req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             id,
+             name,
+             email,
+             phone,
+             role,
+             approved,
+             online,
+             lat,
+             lng,
+             location_updated_at,
+             created_at,
+             (
+               id_card_data IS NOT NULL
+             ) AS has_id_card,
+             COALESCE(
+               courier_debt,
+               0
+             ) AS courier_debt
+           FROM users
+           WHERE role='courier'
+           ORDER BY created_at DESC`
+        );
+
+      return res.json({
+        couriers:
+          result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "admin couriers error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب المندوبين",
+      });
+    }
+  }
+);
+
+/* =========================
+   ADMIN - ID CARD
+========================= */
+
+app.get(
+  "/api/admin/couriers/:id/id-card",
+  auth,
+  role("admin"),
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             id_card_data,
+             id_card_mime
+           FROM users
+           WHERE id=$1
+             AND role='courier'`,
+          [req.params.id]
+        );
+
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "المندوب غير موجود",
+        });
+      }
+
+      const row =
+        result.rows[0];
+
+      if (!row.id_card_data) {
+        return res.status(404).json({
+          error:
+            "بطاقة التعريف غير موجودة",
+        });
+      }
+
+      res.setHeader(
+        "Content-Type",
+        row.id_card_mime ||
+          "image/jpeg"
+      );
+
+      return res.send(
+        row.id_card_data
+      );
+    } catch (error) {
+      console.error(
+        "id card error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+/* =========================
+   ADMIN - APPROVE COURIER
+========================= */
+
+app.post(
+  "/api/admin/couriers/:id/approve",
+  auth,
+  role("admin"),
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `UPDATE users
+           SET approved=1
+           WHERE id=$1
+             AND role='courier'
+           RETURNING
+             id,
+             name,
+             phone,
+             role,
+             approved,
+             online`,
+          [req.params.id]
+        );
+
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "المندوب غير موجود",
+        });
+      }
+
+      return res.json({
+        user:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "approve error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في الخادم",
+      });
+    }
+  }
+);
+
+/* =========================
+   ADMIN - DEBT PAID
+========================= */
+
+app.patch(
+  "/api/admin/couriers/:id/debt/paid",
+  auth,
+  role("admin"),
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `UPDATE users
+           SET courier_debt=0
+           WHERE id=$1
+             AND role='courier'
+           RETURNING
+             id,
+             name,
+             COALESCE(
+               courier_debt,
+               0
+             ) AS courier_debt`,
+          [req.params.id]
+        );
+
+      if (!result.rowCount) {
+        return res.status(404).json({
+          error:
+            "المندوب غير موجود",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        courier_debt:
+          Number(
+            result.rows[0]
+              .courier_debt || 0
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "debt paid error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء تحديث الدين",
+      });
+    }
+  }
+);
+
+/* =========================
+   ADMIN - SETTINGS
+========================= */
+
+app.get(
+  "/api/admin/settings",
+  auth,
+  role("admin"),
+  async (_req, res) => {
+    try {
+      return res.json({
+        settings:
+          await getSettings(),
+      });
+    } catch (error) {
+      console.error(
+        "settings get error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب الإعدادات",
+      });
+    }
+  }
+);
+
+app.patch(
+  "/api/admin/settings",
+  auth,
+  role("admin"),
+  async (req, res) => {
+    try {
+      const settings =
+        req.body?.settings ||
+        req.body ||
+        {};
+
+      for (const [
+        key,
+        value,
+      ] of Object.entries(
+        settings
+      )) {
+        if (
+          typeof value ===
+          "object"
+        ) {
+          continue;
+        }
+
+        await pool.query(
+          `INSERT INTO settings
+           (key,value)
+           VALUES ($1,$2)
+           ON CONFLICT(key)
+           DO UPDATE SET
+             value=EXCLUDED.value`,
+          [
+            key,
+            String(value),
+          ]
+        );
+      }
+
+      return res.json({
+        settings:
+          await getSettings(),
+      });
+    } catch (error) {
+      console.error(
+        "settings update error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء حفظ الإعدادات",
+      });
+    }
+  }
+);
+
+/* =========================
+   ADMIN - STATS
+========================= */
+
+app.get(
+  "/api/admin/stats",
+  auth,
+  role("admin"),
+  async (_req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             COUNT(*) AS orders,
+             COUNT(*) FILTER (
+               WHERE status NOT IN
+               ('completed','cancelled')
+             ) AS active_orders,
+             COUNT(*) FILTER (
+               WHERE status='completed'
+             ) AS completed,
+             COALESCE(
+               SUM(
+                 CASE
+                   WHEN status='completed'
+                   THEN final_price
+                   ELSE 0
+                 END
+               ),
+               0
+             ) AS revenue
+           FROM orders`
+        );
+
+      const users =
+        await pool.query(
+          `SELECT
+             COUNT(*) AS users,
+             COUNT(*) FILTER (
+               WHERE role='customer'
+             ) AS customers,
+             COUNT(*) FILTER (
+               WHERE role='courier'
+             ) AS couriers,
+             COUNT(*) FILTER (
+               WHERE role='courier'
+               AND approved=1
+             ) AS approved_couriers
+           FROM users`
+        );
+
+      return res.json({
+        stats: {
+          users:
+            Number(
+              users.rows[0]
+                ?.users || 0
+            ),
+          customers:
+            Number(
+              users.rows[0]
+                ?.customers || 0
+            ),
+          couriers:
+            Number(
+              users.rows[0]
+                ?.couriers || 0
+            ),
+          approvedCouriers:
+            Number(
+              users.rows[0]
+                ?.approved_couriers ||
+                0
+            ),
+          orders:
+            Number(
+              result.rows[0]
+                ?.orders || 0
+            ),
+          activeOrders:
+            Number(
+              result.rows[0]
+                ?.active_orders ||
+                0
+            ),
+          completed:
+            Number(
+              result.rows[0]
+                ?.completed || 0
+            ),
+          revenue:
+            Number(
+              result.rows[0]
+                ?.revenue || 0
+            ),
+        },
+      });
+    } catch (error) {
+      console.error(
+        "admin stats error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب الإحصائيات",
+      });
+    }
+  }
+);
+
+/* =========================
+   ADMIN - COMPLAINTS
+========================= */
+
+app.get(
+  "/api/admin/complaints",
+  auth,
+  role("admin"),
+  async (_req, res) => {
+    try {
+      const result =
+        await pool.query(
+          `SELECT
+             c.*,
+             u.name AS user_name,
+             u.phone AS user_phone
+           FROM complaints c
+           LEFT JOIN users u
+             ON u.id=c.user_id
+           ORDER BY
+             c.created_at DESC`
+        );
+
+      return res.json({
+        complaints:
+          result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "admin complaints error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ في جلب الشكاوى",
+      });
+    }
+  }
+);
+
+app.patch(
+  "/api/admin/complaints/:id",
+  auth,
+  role("admin"),
+  async (req, res) => {
+    try {
+      const {
+        status,
+        response,
+      } = req.body;
+
+      const result =
+        await pool.query(
+          `UPDATE complaints
+           SET
+             status=$1,
+             response=$2,
+             updated_at=$3
+           WHERE id=$4
+           RETURNING *`,
+          [
+            status ||
+              "resolved",
+            response ??
+              null,
+            new Date().toISOString(),
+            req.params.id,
+          ]
+        );
+
+      if (!result.rows.length) {
+        return res.status(404).json({
+          error:
+            "الشكوى غير موجودة",
+        });
+      }
+
+      return res.json({
+        complaint:
+          result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "complaint update error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "حدث خطأ أثناء تحديث الشكوى",
+      });
+    }
+  }
+);
+
+/* =========================
+   STATIC FRONTEND
+========================= */
+
+const distPath = path.join(
+  process.cwd(),
+  "dist"
+);
+
+app.use(
+  express.static(distPath)
+);
+
+app.get(
+  "/*splat",
+  (_req, res) => {
+    res.sendFile(
+      path.join(
+        distPath,
+        "index.html"
+      )
+    );
+  }
+);
+
+/* =========================
+   SERVER
+========================= */
+
+const PORT =
+  Number(
+    process.env.PORT
+  ) || 3000;
+
+/*
+ * نشغل معالجة الطلبات القديمة أولاً
+ * ثم نفتح السيرفر.
+ */
+migrateOldDeliveredOrders()
+  .catch((error) => {
+    console.error(
+      "startup migration error:",
+      error
+    );
+  })
+  .finally(() => {
+    app.listen(
+      PORT,
+      "0.0.0.0",
+      () => {
+        console.log(
+          `وصلي يعمل على المنفذ ${PORT}`
+        );
+      }
+    );
+  });
