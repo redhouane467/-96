@@ -242,8 +242,60 @@ async function init() {
   `);
 
   /*
+   * ============================================================
+   * تعبئة عمولة الطلبات المكتملة القديمة
+   *
+   * هذا الجزء يملأ commission_amount فقط.
+   * لا يلمس courier_debt ولا يضيف أي دين للمندوبين.
+   * ============================================================
+   */
+  const commissionAmountMarker = await pool.query(
+    `SELECT value
+     FROM settings
+     WHERE key = 'commission_amount_backfill_v1'`
+  );
+
+  if (commissionAmountMarker.rows.length === 0) {
+    const commissionResult = await pool.query(
+      `SELECT value
+       FROM settings
+       WHERE key = 'commission_percent'`
+    );
+
+    const commissionPercent = Number(
+      commissionResult.rows[0]?.value ?? 20
+    );
+
+    await pool.query(
+      `UPDATE orders
+       SET commission_amount =
+         ROUND(
+           (
+             COALESCE(final_price, 0) *
+             $1 / 100
+           )::numeric,
+           2
+         )
+       WHERE status = 'completed'
+         AND final_price IS NOT NULL
+         AND COALESCE(commission_amount, 0) = 0`,
+      [commissionPercent]
+    );
+
+    await pool.query(
+      `INSERT INTO settings(key, value)
+       VALUES('commission_amount_backfill_v1', '1')
+       ON CONFLICT(key) DO NOTHING`
+    );
+  }
+
+  /*
+   * ============================================================
    * تهيئة ديون المندوبين للطلبات المكتملة
    * القديمة التي كانت موجودة قبل نظام الديون.
+   *
+   * هذا الجزء يبقى منفصلًا عن تعبئة commission_amount.
+   * ============================================================
    */
   const debtMarker = await pool.query(
     `SELECT value
