@@ -121,9 +121,6 @@ async function attachCourierInfo(
 
 /* =========================
    OLD DELIVERED ORDERS
-   تحويل الطلبات القديمة التي
-   بقيت delivered إلى completed
-   وحساب العمولة وحفظها
 ========================= */
 
 async function migrateOldDeliveredOrders() {
@@ -1212,10 +1209,6 @@ app.post(
 
 /* =========================
    DELIVER
-   التوصيل = إكمال الطلب
-   + حساب العمولة مباشرة
-   + حفظ العمولة داخل الطلب
-   + إضافة الدين للمندوب
 ========================= */
 
 app.post(
@@ -1318,11 +1311,6 @@ app.post(
             "تعذر إكمال الطلب",
         });
       }
-
-      /*
-       * نسجل مرحلتي التسليم والإكمال.
-       * الطلب أصبح completed مباشرة.
-       */
 
       await client.query(
         `INSERT INTO order_status_history
@@ -1478,8 +1466,6 @@ app.post(
 
 /* =========================
    RATING
-   التقييم اختياري ولا يحسب
-   العمولة ولا يكمل الطلب
 ========================= */
 
 app.post(
@@ -2056,15 +2042,15 @@ app.get(
                WHERE status='completed'
              ) AS completed,
              COALESCE(
-               SUM(
-                 CASE
-                   WHEN status='completed'
-                   THEN COALESCE(
-                     commission_amount,
+               (
+                 SELECT SUM(
+                   COALESCE(
+                     courier_debt,
                      0
                    )
-                   ELSE 0
-                 END
+                 )
+                 FROM users
+                 WHERE role='courier'
                ),
                0
              ) AS revenue
@@ -2278,10 +2264,6 @@ const PORT =
     process.env.PORT
   ) || 3000;
 
-/*
- * نشغل معالجة الطلبات القديمة أولاً
- * ثم نفتح السيرفر.
- */
 migrateOldDeliveredOrders()
   .catch((error) => {
     console.error(
